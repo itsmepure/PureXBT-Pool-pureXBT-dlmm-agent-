@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+.envrypt
+
+# User config (contains RPC URL, wallet key, API keys)
+user-config.json
+
+# Runtime state (position tracking, lessons — user-specific)
+state.json
+lessons.json
+smart-wallets.json
+pool-memory.json
+token-blacklist.json
+strategy-library.json
+decision-log.json
+hivemind-cache.json
+signal-weights.json
+
+# Logs
+logs/
+
+# OS
+.DS_Store
+
+# Dev context
+context.md
+CONTEXT.md
+dev-blocklist.json
+docs/
+
+# Discord listener queue
+discord-signals.json
+
+# Deployer blacklist (runtime-populated, user-specific)
+deployer-blacklist.json
+
+# Dashboard wallet store
+wallets.json
+
+# Playwright MCP browser logs
+.playwright-mcp/
+
+# Claude Code runtime lock
+.claude/scheduled_tasks.lock
+chat-history.json

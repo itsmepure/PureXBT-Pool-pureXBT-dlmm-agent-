@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>PureXBT Pool</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;700&family=Geist:wght@400;500;600;700&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --font:'Geist','Geist Mono',ui-monospace,monospace;
+  --bg:#0a0a0f;--bg-grid:#0f1018;--surface:#13141e;--surface-2:#181a28;--surface-hover:#1e2032;
+  --border:#2a2d3d;--border-soft:#3a3d50;--border-subtle:#222536;--border-accent:#f0c929;
+  --text:#e8e8f0;--text-dim:#6e7191;
+  --accent:#f0c929;--accent-glow:rgba(240,201,41,0.15);--accent-fill:rgba(240,201,41,0.12);--accent-border:#c9a61c;
+  --green:#2ecc71;--green-fill:rgba(46,204,113,0.12);--red:#e74c3c;--red-fill:rgba(231,76,60,0.12);--orange:#f39c12;--orange-fill:rgba(243,156,18,0.12);
+  --radius:4px;
+}
+body{
+  font-family:var(--font);background:var(--bg);
+  background-image:url("/banner.png");
+  background-size:cover;background-position:center;background-attachment:fixed;
+  color:var(--text);min-height:100vh;line-height:1.6;font-size:14px}
+
+#bg-overlay{position:fixed;inset:0;z-index:-1;background:linear-gradient(180deg,rgba(10,10,15,0.88) 0%,rgba(10,10,15,0.94) 100%)}
+.container{max-width:1200px;margin:0 auto;padding:24px 20px 40px}
+.header-card{background:linear-gradient(180deg,#181a28 0%,var(--surface) 100%);border:1px solid var(--border);border-top:2px solid var(--accent);box-shadow:0 4px 24px rgba(0,0,0,0.4),0 0 40px var(--accent-glow);border-radius:var(--radius);margin-bottom:24px;overflow:hidden}
+.header-top-bar{background:#0c0d18;border-bottom:1px solid var(--border);padding:6px 12px;display:flex;align-items:center;gap:7px}
+.win-dot{width:10px;height:10px;border-radius:50%;border:1px solid var(--border-soft)}
+.win-dot.d1{background:var(--orange)}.win-dot.d2{background:var(--accent)}.win-dot.d3{background:var(--green)}
+.win-title{font-size:10px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase}
+.header-inner{display:flex;justify-content:space-between;align-items:center;padding:18px 24px;flex-wrap:wrap;gap:10px}
+.header-left .prompt{font-size:12px;color:var(--accent);margin-bottom:4px;font-weight:600}
+.header-left h1{font-size:22px;font-weight:700;color:#fff;text-shadow:0 0 20px var(--accent-glow)}
+.header-left .sub{font-size:10px;color:var(--text-dim);margin-top:2px;letter-spacing:0.5px}
+.header-right{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.mode-badge{font-size:9px;padding:3px 10px;font-weight:700;border:1px solid var(--accent);background:var(--accent-fill);color:var(--accent);text-transform:uppercase;letter-spacing:1px}
+.status-dot{width:8px;height:8px;border:1px solid var(--green);border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+.status-dot.error{background:var(--red);border-color:var(--red);box-shadow:0 0 8px var(--red)}
+.status-dot.connecting{background:var(--orange);box-shadow:0 0 8px var(--orange);animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+.llm-status-tag{font-size:9px;padding:3px 8px;font-weight:700;border:1px solid var(--green);background:var(--green-fill);color:var(--green);text-transform:uppercase}
+.llm-status-tag.dead{background:var(--red-fill);border-color:var(--red);color:var(--red)}
+.llm-error{font-size:9px;color:var(--red);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+@media(max-width:1000px){.grid-4{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:600px){.grid-4{grid-template-columns:repeat(2,1fr)}}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:600px){.grid-2{grid-template-columns:1fr}}
+.card{background:var(--surface);border:1px solid var(--border);box-shadow:0 2px 12px rgba(0,0,0,0.3);border-radius:var(--radius);padding:16px;transition:0.15s ease;position:relative}
+.card:hover{border-color:var(--border-soft);box-shadow:0 4px 20px rgba(0,0,0,0.4)}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--accent-glow),transparent);opacity:0;transition:opacity 0.3s}
+.card:hover::before{opacity:1}
+.card-label{font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:8px;font-weight:700}
+.card-value{font-size:22px;font-weight:700;line-height:1.2}
+.card-value.pnl-pos{color:var(--green)}.card-value.pnl-neg{color:var(--red)}
+.btn{padding:9px 16px;border:1px solid var(--border);border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.15s;display:inline-flex;align-items:center;gap:6px;font-family:var(--font);text-transform:uppercase;letter-spacing:0.5px;background:var(--surface-2);color:var(--text)}
+.btn:hover{background:var(--surface-hover);border-color:var(--accent-border);box-shadow:0 0 12px var(--accent-glow)}
+.btn:active{transform:scale(0.97)}
+.btn-accent{background:rgba(240,201,41,0.1);border-color:var(--accent-border);color:var(--accent);box-shadow:0 0 8px var(--accent-glow)}
+.btn-accent:hover{background:rgba(240,201,41,0.2);box-shadow:0 0 16px rgba(240,201,41,0.3)}
+.btn-danger{border-color:var(--red);color:var(--red);background:rgba(231,76,60,0.08)}
+.btn-danger:hover{background:var(--red-fill)}
+.btn:disabled{opacity:0.3;cursor:not-allowed;transform:none;box-shadow:none}
+.close-select{background:var(--surface);border:1px solid var(--border);color:var(--text);font-family:var(--font);padding:9px 12px;border-radius:4px;font-size:12px;outline:none;min-width:200px;cursor:pointer}
+.close-select:focus{border-color:var(--accent);box-shadow:0 0 8px var(--accent-glow)}
+.spinner{width:14px;height:14px;border:2px solid transparent;border-top-color:currentColor;border-radius:50%;animation:spin 0.6s linear infinite;display:none}
+.btn.loading .spinner{display:inline-block}.btn.loading .btn-text{opacity:0.5}
+@keyframes spin{to{transform:rotate(360deg)}}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;padding:10px 12px;color:var(--text-dim);font-size:9px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border-accent);font-weight:700;background:var(--bg-grid)}
+td{padding:10px 12px;border-bottom:1px solid var(--border-subtle)}
+tr.clickable{cursor:pointer;transition:background 0.12s}
+tr.clickable:hover{background:var(--surface-hover)}
+tr.clickable:nth-child(odd){background:rgba(255,255,255,0.02)}
+.section-header{display:flex;justify-content:space-between;align-items:center;padding:12px 0;cursor:pointer;user-select:none;font-family:var(--font);border-bottom:1px solid var(--border-subtle);margin-bottom:8px}
+.section-header h2{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--accent)}
+.section-toggle{color:var(--text-dim);font-size:11px;transition:0.15s}
+.section-toggle.open{transform:rotate(180deg)}
+.section-body{display:none}.section-body.open{display:block}
+.config-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.config-row{display:flex;flex-direction:column;gap:4px}
+.config-row label{font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700}
+.config-row input,.config-row select{padding:8px 10px;background:var(--bg-grid);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;font-family:var(--font);outline:none}
+.config-row input:focus{border-color:var(--accent);box-shadow:0 0 8px var(--accent-glow)}
+.form-note{font-size:9px;color:var(--text-dim);margin:4px 0 10px;font-family:var(--font)}
+.decision-item{border-bottom:1px solid var(--border-subtle);cursor:pointer;transition:0.15s}
+.decision-item:hover{background:var(--surface-hover)}
+.decision-item .dec-header{display:grid;grid-template-columns:120px 55px 1fr auto;gap:6px;align-items:baseline;padding:6px 0;font-size:10px}
+.decision-badge{font-size:8px;padding:2px 8px;border-radius:3px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;border:1px solid}
+.badge-deploy{background:var(--green-fill);border-color:var(--green);color:var(--green)}
+.badge-close{background:var(--red-fill);border-color:var(--red);color:var(--red)}
+.badge-skip{background:var(--orange-fill);border-color:var(--orange);color:var(--orange)}
+.dec-expand{display:none;padding:0 0 8px 0}.dec-expand.open{display:block}
+.dec-detail-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:4px;background:var(--bg-grid);padding:8px 10px;border-radius:4px;font-size:9px;border:1px solid var(--border-subtle)}
+.dec-detail-grid .dk{color:var(--text-dim);text-transform:uppercase;font-weight:600}
+.dec-detail-grid .dv{font-weight:700;font-family:'Geist Mono',monospace}
+.dec-risks{margin-top:4px;font-size:9px}.dec-risks .dr-title{color:var(--red);font-weight:700;text-transform:uppercase}
+.dec-risks .dr-item{color:var(--orange);margin-left:6px}.dec-risks .dr-item::before{content:'! '}
+.dec-rejected{margin-top:4px;font-size:9px}.dec-rejected .dj-title{color:var(--orange);font-weight:700;text-transform:uppercase}
+.dec-rejected .dj-item{color:var(--text-dim);margin-left:6px}.dec-rejected .dj-item::before{content:'- '}
+.dec-reason-full{color:var(--text);font-size:10px;margin-top:2px;line-height:1.4}
+.toast-container{position:fixed;top:20px;right:20px;z-index:999;display:flex;flex-direction:column;gap:8px}
+.toast{padding:10px 16px;border-radius:4px;font-size:12px;font-weight:600;animation:slideIn 0.25s;max-width:340px;font-family:var(--font);border:1px solid}
+.toast-success{background:rgba(46,204,113,0.12);border-color:var(--green);color:var(--green)}
+.toast-error{background:rgba(231,76,60,0.12);border-color:var(--red);color:var(--red)}
+@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+.health-bar{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--bg-grid);border-top:1px solid var(--border-soft);font-size:10px;color:var(--text-dim);border-radius:0 0 var(--radius) var(--radius)}
+.expanded-row td{padding:0}
+.expanded-detail{padding:10px 10px 10px 20px;background:var(--bg-grid);display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px;font-size:10px;border-bottom:1px solid var(--border-soft)}
+.detail-item label{color:var(--text-dim);font-size:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:700}
+.detail-item span{font-weight:700}
+.hidden{display:none}
+.empty-state{text-align:center;padding:30px;color:var(--text-dim);font-size:11px}
+.wallet-item{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border-subtle);font-size:10px}
+.wallet-item .wl-addr{font-weight:700;font-family:var(--font);min-width:90px;color:var(--accent)}
+.wallet-item .wl-name{color:var(--text);min-width:70px}
+.wl-badge{font-size:8px;padding:2px 6px;border-radius:3px;border:1px solid;font-weight:700;text-transform:uppercase}
+.wl-badge.active{background:var(--green-fill);border-color:var(--green);color:var(--green)}
+.wallet-item .wl-btn{font-size:9px;padding:3px 8px;cursor:pointer;border-radius:3px;font-family:var(--font);border:1px solid var(--border);background:var(--surface-2);color:var(--text);transition:0.15s}
+.wallet-item .wl-btn:hover{background:var(--surface-hover)}
+.wallet-item .wl-btn.activate{border-color:var(--green);color:var(--green);background:var(--green-fill)}
+.wallet-item .wl-btn.delete{border-color:var(--red);color:var(--red);background:var(--red-fill)}
+.wallet-item .wl-btn.llm{border-color:var(--accent);color:var(--accent)}
+.wallet-item .wl-btn.cfg{border-color:var(--orange);color:var(--orange);background:var(--orange-fill)}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:100;justify-content:center;align-items:center}
+.modal-overlay.show{display:flex}
+.modal-box{background:var(--bg-grid);border:1px solid var(--border);border-radius:var(--radius);padding:20px;width:400px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,0.6)}
+.modal-box h3{margin:0 0 16px;font-size:14px;color:var(--accent)}
+.modal-box .config-row{margin-bottom:10px}
+.modal-box .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.modal-box.wide{width:700px;max-width:95vw;max-height:85vh;overflow-y:auto}
+.cfg-section{margin-bottom:16px}
+.cfg-section h4{font-size:11px;color:var(--accent);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid var(--border-subtle);font-weight:700}
+.stats-tabs{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}
+.stats-tab{padding:5px 12px;border:1px solid var(--border);border-radius:4px;font-size:10px;cursor:pointer;font-family:var(--font);font-weight:700;background:var(--surface-2);color:var(--text-dim);transition:0.15s;text-transform:uppercase}
+.stats-tab:hover{background:var(--surface-hover);color:var(--text)}
+.stats-tab.active{background:rgba(240,201,41,0.1);border-color:var(--accent);color:var(--accent);box-shadow:0 0 8px var(--accent-glow)}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+.stats-cell{background:var(--bg-grid);padding:10px;border-radius:4px;border:1px solid var(--border-subtle);text-align:center}
+.stats-cell .val{font-size:18px;font-weight:700}.stats-cell .lbl{font-size:8px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;margin-top:2px}
+.stats-cell .val.green{color:var(--green)}.stats-cell .val.red{color:var(--red)}
+#login-overlay{position:fixed;inset:0;background:rgba(5,5,15,0.95);display:flex;align-items:center;justify-content:center;z-index:1000}
+.login-box{background:var(--surface);border:1px solid var(--border);box-shadow:0 0 40px var(--accent-glow),0 8px 40px rgba(0,0,0,0.5);border-radius:var(--radius);padding:32px 28px;text-align:center;min-width:320px;max-width:380px}
+.login-box h2{font-size:18px;font-weight:700;margin-bottom:6px;text-transform:uppercase;letter-spacing:2px;color:var(--accent);text-shadow:0 0 20px var(--accent-glow)}
+.login-box .login-sub{font-size:9px;color:var(--text-dim);margin-bottom:20px}
+.login-box input{width:100%;padding:12px;border:1px solid var(--border);border-radius:4px;font-family:var(--font);font-size:14px;background:var(--bg-grid);color:var(--text);outline:none;margin-bottom:14px}
+.login-box input:focus{border-color:var(--accent);box-shadow:0 0 12px var(--accent-glow)}
+.login-box .login-err{color:var(--red);font-size:10px;margin-bottom:8px;min-height:16px}
+</style>
+</head>
+<body>
+<div class="toast-container" id="toast-container"></div>
+<div id="login-overlay">
+  <div class="login-box">
+    <h2>PureXBT Pool</h2>
+    <div class="login-sub">pureXBT dlmm agent</div>
+    <input type="password" id="login-password" placeholder="Enter password..." onkeydown="if(event.key==='Enter')doLogin()" autofocus>
+    <div class="login-err" id="login-err"></div>
+    <button class="btn btn-accent" style="width:100%" onclick="doLogin()"><span class="spinner"></span><span class="btn-text">&#9654; login</span></button>
+  </div>
+</div>
+<div id="main-dashboard" style="display:none">
+<div class="container">
+  <div class="header-card">
+    <div class="header-top-bar"><div class="win-dot d1"></div><div class="win-dot d2"></div><div class="win-dot d3"></div><span class="win-title">terminal &middot; pureXBT v0.1</span></div>
+    <div class="header-inner">
+      <div class="header-left"><div class="prompt">$ ssh purexbt_pool@agent</div><h1>PureXBT Pool</h1><div class="sub">pureXBT dlmm agent // cyberpunk</div></div>
+      <div class="header-right"><span class="llm-status-tag checking" id="llm-tag">LLM: ---</span><span class="llm-error" id="llm-err" style="display:none"></span><span class="mode-badge" id="header-mode">LIVE</span><div class="status-dot connecting" id="status-dot"></div></div>
+    </div>
+  </div>
+  <div class="grid-4" id="stats-grid">
+    <div class="card"><div class="card-label">Balance</div><div class="card-value" id="stat-balance">---</div></div>
+    <div class="card"><div class="card-label">Active Positions</div><div class="card-value" id="stat-positions">---</div></div>
+    <div class="card"><div class="card-label">Unrealized PnL</div><div class="card-value" id="stat-unrealized">---</div></div>
+    <div class="card"><div class="card-label">Realized PnL</div><div class="card-value" id="stat-realized">---</div></div>
+  </div>
+  <div class="card" style="margin-bottom:20px">
+    <h2 style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--accent);margin-bottom:8px">Activity Stats</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+      <div class="stats-tabs" id="stats-tabs">
+        <button class="stats-tab active" onclick="fetchStats('6h')">6h</button><button class="stats-tab" onclick="fetchStats('1d')">1d</button><button class="stats-tab" onclick="fetchStats('7d')">7d</button><button class="stats-tab" onclick="fetchStats('14d')">14d</button><button class="stats-tab" onclick="fetchStats('1m')">1m</button>
+      </div>
+    </div>
+    <div class="stats-grid" id="stats-activity"></div>
+  </div>
+  <div class="control-bar" style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;align-items:center">
+    <select style="font-family:var(--font);font-size:10px;padding:4px 8px;border:1px solid var(--border-accent);background:var(--bg-grid);color:var(--accent);border-radius:3px;font-weight:700;min-width:160px" id="global-wallet" onchange="onGlobalWalletChange()">
+      <option value="">all wallets</option>
+    </select>
+    <button type="button" class="btn btn-accent" id="btn-screen" onclick="doAction('screen')"><span class="spinner"></span><span class="btn-text">&#9655; screen</span></button>
+    <button type="button" class="btn btn-accent" id="btn-manage" onclick="doAction('manage')"><span class="spinner"></span><span class="btn-text">&#9881; manage</span></button>
+    <select class="close-select" id="close-select"><option value="">-- close_position --</option></select>
+    <button type="button" class="btn btn-danger" id="btn-close" onclick="doClose()"><span class="spinner"></span><span class="btn-text">&#10005; close</span></button>
+    <button type="button" class="btn btn-accent" id="btn-claim" onclick="doClaim()"><span class="spinner"></span><span class="btn-text">&#9733; claim</span></button>
+    <button type="button" class="btn btn-outline" id="btn-refresh" onclick="fetchState()"><span class="spinner"></span><span class="btn-text">&#8635; refresh</span></button>
+  </div>
+  <div class="card" style="margin-bottom:20px">
+    <h2 style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--accent);margin-bottom:12px">Open Positions</h2>
+    <div class="table-wrap"><table><thead><tr><th>Pool</th><th>Amount (SOL)</th><th>Status</th><th>PnL</th><th>Fees (SOL)</th><th>Hold</th><th></th></tr></thead><tbody id="positions-body"></tbody></table></div>
+  </div>
+  <div style="margin-bottom:20px">
+    <div class="section-header" onclick="toggleSection('history-section')"><h2>Position History</h2><span class="section-toggle" id="history-toggle">&#9660;</span></div>
+    <div class="section-body open" id="history-section"><div class="card"><div style="display:flex;gap:8px;align-items:center;margin-bottom:10px"><select id="hist-wallet" style="font-family:var(--font);font-size:9px;padding:2px 6px;border:1px solid var(--border);background:var(--bg-grid);color:var(--text-dim);border-radius:3px;font-weight:600;min-width:140px" onchange="fetchHistory()"><option value="">all wallets</option></select><span id="hist-summary" style="font-size:9px;color:var(--text-dim);margin-left:auto"></span></div><div class="table-wrap"><table><thead><tr><th>Pool</th><th>Strategy</th><th>Deploy SOL</th><th>PnL $</th><th>PnL %</th><th>Fees $</th><th>Hold</th><th>Peak %</th><th>Status</th><th>Reason</th></tr></thead><tbody id="history-body"><tr><td colspan="10" class="empty-state">Loading...</td></tr></tbody></table></div><div id="hist-pager" style="display:none;gap:8px;align-items:center;justify-content:center;margin-top:8px;font-size:9px"><button class="wl-btn" onclick="histPage(-1)" id="hist-prev">&#8592; Prev</button><span id="hist-page" style="color:var(--text-dim);font-weight:600"></span><button class="wl-btn" onclick="histPage(1)" id="hist-next">Next &#8594;</button></div></div></div>
+  </div>
+  <div style="margin-bottom:20px">
+    <div class="section-header" onclick="toggleSection('config-section')"><h2>Configuration</h2><span class="section-toggle" id="config-toggle">&#9660;</span></div>
+    <div class="section-body" id="config-section"><div class="card"><div class="config-grid" id="config-grid"></div><button type="button" class="btn btn-accent" style="margin-top:12px" onclick="saveConfig()"><span class="spinner"></span><span class="btn-text">$ save_config</span></button></div></div>
+  </div>
+  <div style="margin-bottom:20px">
+    <div class="section-header" onclick="toggleSection('llm-section')"><h2>&#9881; LLM Provider</h2><span class="section-toggle" id="llm-toggle">&#9660;</span></div>
+    <div class="section-body" id="llm-section"><div class="card"><div class="form-note">* Changes require agent restart. Leave API key blank to keep existing.</div><div class="config-grid"><div class="config-row"><label>LLM Base URL</label><input type="text" id="llm-base-url" placeholder="https://api.deepseek.com/v1"></div><div class="config-row"><label>LLM API Key</label><input type="password" id="llm-api-key" placeholder="sk-..."></div><div class="config-row"><label>LLM Model</label><input type="text" id="llm-model" placeholder="deepseek-chat"></div></div><button type="button" class="btn btn-accent" style="margin-top:12px" onclick="saveLLM()"><span class="spinner"></span><span class="btn-text">&#9881; save llm</span></button><div id="llm-status" style="margin-top:8px;font-size:10px;color:var(--text-dim)"></div></div></div>
+  </div>
+  <div style="margin-bottom:20px">
+    <div class="section-header" onclick="toggleSection('wallets-section')"><h2>Wallet List</h2><span class="section-toggle" id="wallets-toggle">&#9660;</span></div>
+    <div class="section-body" id="wallets-section"><div class="card"><div class="form-note">* Private keys stored locally in wallets.json</div><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px"><div class="config-row" style="flex:1;min-width:160px"><label>Name</label><input type="text" id="wallet-name" placeholder="My Wallet"></div><div class="config-row" style="flex:2;min-width:260px"><label>Private Key (base58)</label><input type="password" id="wallet-key" placeholder="Paste base58 private key..."></div><button type="button" class="btn btn-accent" onclick="addWallet()"><span class="spinner"></span><span class="btn-text">&#9672; add wallet</span></button></div><div class="form-note" style="margin-bottom:4px">Per-wallet LLM (optional — leave blank to use global settings)</div><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px"><div class="config-row" style="flex:1;min-width:140px"><label>LLM Base URL</label><input type="text" id="wallet-llm-url" placeholder="https://api.deepseek.com/v1"></div><div class="config-row" style="flex:1;min-width:140px"><label>LLM API Key</label><input type="password" id="wallet-llm-key" placeholder="sk-..."></div><div class="config-row" style="flex:1;min-width:140px"><label>LLM Model</label><input type="text" id="wallet-llm-model" placeholder="deepseek-chat"></div></div><div id="wallet-list" class="empty-state">No wallets saved</div></div></div>
+  </div>
+  <div style="margin-bottom:20px">
+    <div class="grid-2">
+       <div><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700">Recent Decisions</div><select id="dec-wallet" style="font-family:var(--font);font-size:9px;padding:2px 6px;border:1px solid var(--border);background:var(--bg-grid);color:var(--text-dim);border-radius:3px;font-weight:600;min-width:140px" onchange="fetchDecisions()"><option value="">all wallets</option></select></div><div class="card" style="max-height:360px;overflow-y:auto" id="decisions-list"></div></div>
+       <div><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700">Agent Activity Log</div><select id="log-wallet" style="font-family:var(--font);font-size:9px;padding:2px 6px;border:1px solid var(--border);background:var(--bg-grid);color:var(--text-dim);border-radius:3px;font-weight:600;min-width:140px" onchange="fetchLogs()"><option value="">all wallets</option></select></div><div class="card" style="max-height:360px;overflow-y:auto;padding:6px 10px"><pre id="logs-output" style="font-family:'Geist Mono',monospace;font-size:9px;line-height:1.5;color:var(--text-dim);white-space:pre-wrap;word-break:break-all;margin:0"></pre></div></div>
+    </div>
+  </div>
+  <div class="health-bar"><span>[uptime <span id="health-uptime">---</span>]</span><span>api: <span id="health-latency">---</span>ms</span><span id="health-last"></span></div>
+</div>
+<div id="bg-overlay"></div>
+<div class="modal-overlay" id="llm-modal">
+  <div class="modal-box">
+    <h3 id="llm-modal-title">Edit LLM Config</h3>
+    <div class="form-note" id="llm-modal-addr" style="font-weight:700;color:var(--accent);margin-bottom:12px"></div>
+    <div class="config-row"><label>LLM Base URL</label><input type="text" id="llm-edit-url" placeholder="https://api.openai.com/v1"></div>
+    <div class="config-row"><label>LLM API Key</label><input type="password" id="llm-edit-key" placeholder="sk-..."></div>
+    <div class="config-row"><label>LLM Model</label><input type="text" id="llm-edit-model" placeholder="gpt-4o-mini"></div>
+    <div class="form-note" style="margin-top:6px">Leave fields blank to use global LLM. Click save to update.</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeLLMModal()" style="border-color:var(--border);background:var(--surface-2);color:var(--text)">cancel</button>
+      <button class="btn btn-accent" onclick="saveWalletLLM()"><span class="spinner"></span><span class="btn-text">save llm</span></button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="cfg-modal" onclick="if(event.target===this)closeWalletCfgModal()">
+  <div class="modal-box wide">
+    <h3 id="cfg-modal-title">Wallet Config</h3>
+    <div class="form-note" id="cfg-modal-addr" style="font-weight:700;color:var(--accent);margin-bottom:12px"></div>
+    <div id="cfg-modal-body"></div>
+    <div class="form-note" style="margin-top:8px">Leave blank to use global settings. Only overridden values are saved.</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeWalletCfgModal()" style="border-color:var(--border);background:var(--surface-2);color:var(--text)">cancel</button>
+      <button class="btn btn-danger" onclick="resetWalletConfig()" style="border-color:var(--red);color:var(--red)">reset to global</button>
+      <button class="btn btn-accent" onclick="saveWalletConfig()"><span class="spinner"></span><span class="btn-text">save config</span></button>
+    </div>
+  </div>
+</div>
+<script>
+const BASE=window.location.origin;let STATE=null,CONFIG=null,_WALLETS=[],startTime=Date.now(),_currentPeriod="1d";
+function getAuth(){const p=sessionStorage.getItem('dash_pw');return p?{'Authorization':'Basic '+btoa('admin:'+p)}:{}}
+async function api(path,opts={}){const h={'Content-Type':'application/json',...getAuth()};const r=await fetch(BASE+path,{...opts,headers:h});if(r.status===401){sessionStorage.removeItem('dash_pw');showLogin()}return r}
+function showLogin(){document.getElementById('main-dashboard').style.display='none';document.getElementById('login-overlay').style.display='flex';document.getElementById('login-password').focus()}
+async function doLogin(){const p=document.getElementById('login-password').value.trim();if(!p)return;const b=document.querySelector('#login-overlay .btn');b.classList.add('loading');try{const r=await fetch(BASE+'/api/health',{headers:{'Authorization':'Basic '+btoa('admin:'+p)}});if(r.ok){sessionStorage.setItem('dash_pw',p);document.getElementById('login-overlay').style.display='none';document.getElementById('main-dashboard').style.display='block';document.getElementById('login-err').textContent='';boot()}else{document.getElementById('login-err').textContent='Wrong password'}}catch{document.getElementById('login-err').textContent='Connection failed'}b.classList.remove('loading')}
+(function(){const p=sessionStorage.getItem('dash_pw');if(p){fetch(BASE+'/api/health',{headers:{'Authorization':'Basic '+btoa('admin:'+p)}}).then(r=>{if(r.ok){document.getElementById('login-overlay').style.display='none';document.getElementById('main-dashboard').style.display='block';boot()}else{sessionStorage.removeItem('dash_pw');showLogin()}}).catch(()=>showLogin())}})();
+function boot(){fetchState();fetchDecisions();fetchConfig();refreshLLMStatus();refreshWallets();fetchHistory();fetchStats("1d");setInterval(fetchState,5000);setInterval(fetchDecisions,5000);setInterval(refreshLLMStatus,15000);setInterval(fetchLogs,3000);setInterval(fetchHistory,15000)}
+async function refreshLLMStatus(){const t=document.getElementById('llm-tag'),e=document.getElementById('llm-err');try{const r=await api('/api/llm/status');const s=await r.json();const m=(s.model||'?').length>20?s.model.slice(0,18)+'..':(s.model||'---');if(s.ok){t.textContent='LLM: '+m;t.className='llm-status-tag';e.style.display='none'}else{t.textContent='LLM: '+m+' \u2717';t.className='llm-status-tag dead';if(s.error){e.textContent=s.error;e.style.display='inline-block';e.title=s.error}}}catch{t.textContent='LLM: ---';t.className='llm-status-tag checking';e.style.display='none'}}
+async function fetchState(){const t0=performance.now();try{const w=document.getElementById('global-wallet')?.value||'';const r=await api('/api/state'+(w?'?wallet='+encodeURIComponent(w):''));STATE=await r.json();document.getElementById('health-latency').textContent=Math.round(performance.now()-t0);document.getElementById('status-dot').classList.remove('connecting','error');document.getElementById('health-last').textContent=new Date().toLocaleTimeString();renderState()}catch{document.getElementById('status-dot').classList.add('error')}}
+function renderState(){if(!STATE)return;const s=STATE;document.getElementById('stat-balance').textContent=(s.balanceSol??0).toFixed(4)+' SOL';document.getElementById('stat-positions').textContent=(s.positions?.length||0)+' / '+(CONFIG?.risk?.maxPositions||'?');const uPnl=s.openPnlUsd??0,uel=document.getElementById('stat-unrealized');uel.textContent=(uPnl>=0?'+':'')+'$'+Math.abs(uPnl).toFixed(4);uel.className='card-value '+(uPnl>=0?'pnl-pos':'pnl-neg');const rPnl=s.realizedPnlUsd??0,rel=document.getElementById('stat-realized');rel.textContent=(rPnl>=0?'+':'')+'$'+Math.abs(rPnl).toFixed(4);rel.className='card-value '+(rPnl>=0?'pnl-pos':'pnl-neg');document.getElementById('header-mode').textContent=s.dryRun?'DRY RUN':'LIVE';const tbody=document.getElementById('positions-body'),positions=s.positions||[];if(!positions.length){tbody.innerHTML='<tr><td colspan="7" class="empty-state">No open positions</td></tr>';document.getElementById('btn-close').disabled=true;return}document.getElementById('btn-close').disabled=false;tbody.innerHTML=positions.map((p,i)=>{const sc=p.status==='IN_RANGE'?'IN RANGE':'OOR',scC=p.status==='IN_RANGE'?'var(--green)':'var(--orange)';const pp=(p.pnlPct??0)>=0?'pnl-pos':'pnl-neg',pc=(p.pnlPct??0)>=0?'var(--green)':'var(--red)';return`<tr class="clickable" onclick="toggleRow(this,${i})"><td><span style="font-weight:700">${esc(p.poolName||'')}</span></td><td>${(p.deployAmountSol??0).toFixed(4)} SOL</td><td><span style="color:${scC};font-weight:700">${sc}</span></td><td><span style="color:${pc};font-weight:700">${(p.pnlPct??0).toFixed(2)}%</span></td><td>${(p.feesSol??0).toFixed(3)}</td><td>${fmtMinutes(p.holdMinutes??0)}</td><td style="text-align:right;color:var(--text-dim)">&#9654;</td></tr><tr class="hidden expanded-row" id="exp-${i}"><td colspan="7"><div class="expanded-detail"><div class="detail-item"><label>Address</label><span>${(p.address||'').slice(0,8)}...</span></div><div class="detail-item"><label>PnL USD</label><span style="color:${pc}">$${(p.pnlUsd??0).toFixed(4)}</span></div><div class="detail-item"><label>Fees USD</label><span>$${(p.feesUsd??0).toFixed(2)}</span></div><div class="detail-item"><label>Strategy</label><span>${esc(p.strategy||'--')}</span></div></div></td></tr>`}).join('');const sel=document.getElementById('close-select');sel.innerHTML='<option value="">-- close_position --</option>'+positions.map(p=>`<option value="${esc(p.address)}">${esc(p.poolName||'')} (${(p.pnlPct??0).toFixed(1)}%)</option>`).join('');document.getElementById('health-uptime').textContent=fmtSeconds(Math.floor((Date.now()-startTime)/1000))}
+function toggleRow(_t,i){document.getElementById('exp-'+i).classList.toggle('hidden')}
+async function fetchDecisions(){try{const w=document.getElementById('dec-wallet')?.value||'';const r=await api('/api/decisions?limit=40'+(w?'&wallet='+encodeURIComponent(w):''));const d=await r.json();const decisions=d.decisions||d;const list=document.getElementById('decisions-list');if(!Array.isArray(decisions)||!decisions.length){list.innerHTML='<div class="empty-state">No decisions yet</div>';return}list.innerHTML=decisions.slice(-15).reverse().map((d,i)=>{const badge=d.type==='deploy'?'badge-deploy':d.type==='close'?'badge-close':'badge-skip';const time=d.ts?new Date(d.ts).toLocaleString():'';const pool=d.pool_name||(d.pool||'').slice(0,12)+'...'||'--';const eid='dec-exp-'+i;let mh='',rh='',jh='',reason='';if(d.metrics&&Object.keys(d.metrics).length)mh=Object.entries(d.metrics).map(([k,v])=>`<div><span class="dk">${k}</span> <span class="dv">${typeof v==='number'&&v%1?v.toFixed(4):v}</span></div>`).join('');if(Array.isArray(d.risks)&&d.risks.length)rh='<div class="dec-risks"><div class="dr-title">RISKS</div>'+d.risks.map(r=>`<div class="dr-item">${esc(r)}</div>`).join('')+'</div>';if(Array.isArray(d.rejected)&&d.rejected.length)jh='<div class="dec-rejected"><div class="dj-title">ALTERNATIVES REJECTED</div>'+d.rejected.map(r=>`<div class="dj-item">${esc(r)}</div>`).join('')+'</div>';if(d.reason)reason='<div class="dec-reason-full">'+esc(d.reason)+'</div>';return`<div class="decision-item" onclick="toggleDecExpand('${eid}',this)"><div class="dec-header"><span style="color:var(--text-dim);font-size:9px">${time}</span><span class="decision-badge ${badge}">${esc(d.type||'?')}</span><span style="font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(pool)}</span><span style="color:var(--text-dim);font-size:9px">&#9660;</span></div><div class="dec-expand" id="${eid}">${mh?`<div class="dec-detail-grid">${mh}</div>`:''}${reason}${rh}${jh}</div></div>`}).join('')}catch{}}
+function toggleDecExpand(id){const e=document.getElementById(id);if(e)e.classList.toggle('open')}
+function onWalletViewChange(){fetchDecisions();fetchLogs()}
+function onGlobalWalletChange(){fetchState();fetchStats(_currentPeriod);fetchDecisions();fetchLogs()}
+function populateViewWallet(wallets){const sel=document.getElementById('global-wallet');if(sel){const v=sel.value;sel.innerHTML='<option value="">all wallets</option>'+wallets.map(w=>`<option value="${esc(w.address)}">${esc(w.name||w.address.slice(0,8)+'..')}</option>`).join('');if(v)sel.value=v}const logSel=document.getElementById('log-wallet');if(logSel){const lv=logSel.value;logSel.innerHTML='<option value="">all wallets</option>'+wallets.map(w=>`<option value="${esc(w.address)}">${esc(w.name||w.address.slice(0,8)+'..')}</option>`).join('');if(lv)logSel.value=lv}const decSel=document.getElementById('dec-wallet');if(decSel){const dv=decSel.value;decSel.innerHTML='<option value="">all wallets</option>'+wallets.map(w=>`<option value="${esc(w.address)}">${esc(w.name||w.address.slice(0,8)+'..')}</option>`).join('');if(dv)decSel.value=dv}}
+async function fetchConfig(){try{const r=await api('/api/config');const d=await r.json();CONFIG=d.config||d;renderConfig();if(STATE)renderState()}catch{}}
+const EDITABLE_KEYS=['stopLossPct','takeProfitPct','maxPositions','deployAmountSol','maxDeployAmount','managementIntervalMin','screeningIntervalMin'];
+function getConfigValue(key){if(!CONFIG)return;for(const s of['management','risk','schedule','screening','llm'])if(CONFIG[s]&&CONFIG[s][key]!==undefined)return CONFIG[s][key];return CONFIG[key]}
+function renderConfig(){document.getElementById('config-grid').innerHTML=EDITABLE_KEYS.map(k=>{const v=getConfigValue(k);return`<div class="config-row"><label>${k}</label><input type="text" id="cfg-${k}" value="${v!=null?v:''}"></div>`}).join('')}
+async function saveConfig(){const b=document.querySelector('#config-section .btn');b.classList.add('loading');const u={};EDITABLE_KEYS.forEach(k=>{const e=document.getElementById('cfg-'+k);if(!e)return;const v=e.value.trim();if(v===''){u[k]=null;return}u[k]=Number.isNaN(Number(v))?v:Number(v)});try{const r=await api('/api/config',{method:'POST',body:JSON.stringify({changes:u,reason:'dashboard_config'})});if(r.ok){toast('config saved',true);fetchConfig()}else{const e=await r.json();toast(e.error||'save failed',false)}}catch{toast('save failed',false)}b.classList.remove('loading')}
+async function fetchLogs(){try{const w=document.getElementById('log-wallet')?.value||'';const r=await api('/api/logs?lines=30'+(w?'&wallet='+encodeURIComponent(w):''));const d=await r.json();const lines=d.lines||[];const o=document.getElementById('logs-output');o.textContent=lines.join('\n');o.scrollTop=o.scrollHeight}catch{}}
+async function fetchStats(period){_currentPeriod=period;const w=document.getElementById('global-wallet')?.value||'';document.querySelectorAll('.stats-tab').forEach(t=>t.classList.toggle('active',t.textContent.trim().toLowerCase()===period));try{const r=await api('/api/stats?period='+period+(w?'&wallet='+encodeURIComponent(w):''));const d=await r.json();if(!d.ok)return;const s=d.stats;const g=document.getElementById('stats-activity'),pc=s.totalPnlUsd>=0?'green':'red';g.innerHTML=`<div class="stats-cell"><div class="val">${s.deploys}</div><div class="lbl">Deploys</div></div><div class="stats-cell"><div class="val">${s.closes}</div><div class="lbl">Closes</div></div><div class="stats-cell"><div class="val ${s.winRate>=50?'green':'red'}">${s.winRate}%</div><div class="lbl">Win Rate</div></div><div class="stats-cell"><div class="val ${pc}">${s.totalPnlUsd>=0?'+':''}$${Math.abs(s.totalPnlUsd).toFixed(4)}</div><div class="lbl">PnL (USD)</div></div><div class="stats-cell"><div class="val">$${s.totalFeesUsd.toFixed(4)}</div><div class="lbl">Fees (USD)</div></div><div class="stats-cell"><div class="val">${s.skip}</div><div class="lbl">Skips</div></div>`}catch{}}
+async function refreshWallets(){try{const r=await api('/api/wallets');const d=await r.json();const wallets=d.wallets||[];_WALLETS=wallets;const list=document.getElementById('wallet-list');if(!wallets.length){list.innerHTML='<div style="padding:16px;color:var(--text-dim);text-align:center">No wallets saved</div>';populateViewWallet([]);return}list.innerHTML=wallets.map(w=>{const at=w.active?'<span class="wl-badge active">PRIMARY</span>':'';const sb=w.envWallet?(w.running?`<button class="wl-btn" style="border-color:var(--red);color:var(--red)" onclick="event.stopPropagation();togglePrimaryAgent('stop')">stop</button>`:`<button class="wl-btn activate" onclick="event.stopPropagation();togglePrimaryAgent('start')">start</button>`):(w.running?`<button class="wl-btn" style="border-color:var(--red);color:var(--red)" onclick="event.stopPropagation();toggleWallet('${w.id}','stop')">stop</button>`:`<button class="wl-btn activate" onclick="event.stopPropagation();toggleWallet('${w.id}','start')">start</button>`);return`<div class="wallet-item"><span class="wl-addr" title="${esc(w.address)}">${esc(w.address.slice(0,6)+'..'+w.address.slice(-4))}</span><span class="wl-name">${esc(w.name)}</span>${at}${sb}<button class="wl-btn cfg" onclick="event.stopPropagation();editWalletConfig('${w.id}')">⚙ config</button><button class="wl-btn llm" onclick="event.stopPropagation();editWalletLLM('${w.id}')">⚙ llm</button><button class="wl-btn delete" onclick="removeWallet('${w.id}')">delete</button></div>`}).join('');populateViewWallet(wallets);populateHistWallet(wallets)}catch{}}
+async function addWallet(){const b=document.querySelector('#wallets-section .btn');b.classList.add('loading');const n=document.getElementById('wallet-name').value.trim(),k=document.getElementById('wallet-key').value.trim();if(!k){toast('Private key required',false);b.classList.remove('loading');return}const body={name:n||undefined,privateKey:k,setActive:false};const lu=document.getElementById('wallet-llm-url')?.value.trim();const lk=document.getElementById('wallet-llm-key')?.value.trim();const lm=document.getElementById('wallet-llm-model')?.value.trim();if(lu||lk||lm)body.llm={baseUrl:lu||undefined,apiKey:lk||undefined,model:lm||undefined};try{const r=await api('/api/wallets',{method:'POST',body:JSON.stringify(body)});if(r.ok){toast('Wallet added',true);document.getElementById('wallet-key').value='';document.getElementById('wallet-name').value='';const wu=document.getElementById('wallet-llm-url');if(wu)wu.value='';const wk=document.getElementById('wallet-llm-key');if(wk)wk.value='';const wm=document.getElementById('wallet-llm-model');if(wm)wm.value='';refreshWallets();fetchState()}else{const e=await r.json();toast(e.error||'failed',false)}}catch{toast('failed',false)}b.classList.remove('loading')}
+async function activateWallet(id){try{const r=await api('/api/wallets/'+id+'/activate',{method:'POST'});if(r.ok){toast('Wallet activated',true);refreshWallets();fetchState()}else{const e=await r.json();toast(e.error||'failed',false)}}catch{toast('failed',false)}}
+async function removeWallet(id){if(!confirm('Delete this wallet?'))return;try{const r=await api('/api/wallets/'+id,{method:'DELETE'});if(r.ok){toast('Wallet removed',true);refreshWallets();fetchState()}else{const e=await r.json();toast(e.error||'failed',false)}}catch{toast('failed',false)}}
+async function togglePrimaryAgent(action){try{const r=await api('/api/agent/'+action,{method:'POST'});if(r.ok){toast('Agent '+(action==='start'?'started':'stopped'),true);refreshWallets();fetchState()}else{const e=await r.json();toast(e.error||'failed',false)}}catch{toast('failed',false)}}
+async function toggleWallet(id,action){try{const r=await api('/api/wallets/'+id+'/'+action,{method:'POST'});if(r.ok){toast('Wallet '+(action==='start'?'started':'stopped'),true);refreshWallets()}else{const e=await r.json();toast(e.error||'failed',false)}}catch{toast('failed',false)}}
+function getGlobalWallet(){const s=document.getElementById('global-wallet');return s?.value||''}
+async function doAction(action){const bid=action==='screen'?'btn-screen':'btn-manage',b=document.getElementById(bid);b.classList.add('loading');const wallet=getGlobalWallet();try{const r=await api('/api/action',{method:'POST',body:JSON.stringify({action,wallet})});if(r.ok){toast((wallet?wallet.slice(0,8)+'.. ':'')+action+' started',true);fetchState();fetchDecisions()}else{const e=await r.json();toast(e.error||'failed',false)}}catch{toast('failed',false)}b.classList.remove('loading')}
+async function doClose(){const a=document.getElementById('close-select').value;if(!a)return;const b=document.getElementById('btn-close');b.classList.add('loading');const wallet=getGlobalWallet();try{const r=await api('/api/action',{method:'POST',body:JSON.stringify({action:'close',position:a,wallet})});if(r.ok){toast('close requested',true);fetchState();fetchDecisions()}else{const e=await r.json();toast(e.error||'failed',false)}}catch{toast('failed',false)}b.classList.remove('loading')}
+async function doClaim(){const a=document.getElementById('close-select').value;if(!a)return;const b=document.getElementById('btn-claim');b.classList.add('loading');const wallet=getGlobalWallet();try{const r=await api('/api/action',{method:'POST',body:JSON.stringify({action:'claim',position:a,wallet})});if(r.ok){toast('claim requested',true);fetchState();fetchDecisions()}else{const e=await r.json();toast(e.error||'failed',false)}}catch{toast('failed',false)}b.classList.remove('loading')}
+function toast(msg,ok){const c=document.getElementById('toast-container'),d=document.createElement('div');d.className='toast '+(ok?'toast-success':'toast-error');d.textContent=msg;c.appendChild(d);setTimeout(()=>{d.style.opacity='0';d.style.transition='opacity 0.3s';setTimeout(()=>d.remove(),300)},3000)}
+function toggleSection(id){const b=document.getElementById(id),t=document.getElementById(id.replace('section','toggle'));b.classList.toggle('open');if(t)t.classList.toggle('open')}
+function fmtMinutes(m){if(m<60)return Math.floor(m)+'m';if(m<1440)return Math.floor(m/60)+'h '+Math.floor(m%60)+'m';return Math.floor(m/1440)+'d '+Math.floor((m%1440)/60)+'h'}
+function fmtSeconds(s){if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m'}
+function esc(s){return String(s||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[m])}
+let _editingWalletId=null;
+function editWalletLLM(id){const w=_WALLETS.find(x=>x.id===id);if(!w)return;_editingWalletId=id;document.getElementById('llm-modal-title').textContent='Edit LLM: '+esc(w.name||w.address.slice(0,8));document.getElementById('llm-modal-addr').textContent=w.address;document.getElementById('llm-edit-url').value=(w.llm?.baseUrl)||'';document.getElementById('llm-edit-key').value=(w.llm?.apiKey)||'';document.getElementById('llm-edit-model').value=(w.llm?.model)||'';document.getElementById('llm-modal').classList.add('show')}
+function closeLLMModal(){document.getElementById('llm-modal').classList.remove('show');_editingWalletId=null}
+async function saveWalletLLM(){if(!_editingWalletId)return;const b=document.querySelector('#llm-modal .btn-accent');b.classList.add('loading');const body={baseUrl:document.getElementById('llm-edit-url').value.trim(),apiKey:document.getElementById('llm-edit-key').value.trim(),model:document.getElementById('llm-edit-model').value.trim()};try{const r=await api('/api/wallets/'+_editingWalletId+'/llm',{method:'POST',body:JSON.stringify(body)});if(r.ok){toast('LLM saved',true);closeLLMModal();refreshWallets()}else{const e=await r.json();toast(e.error||'failed',false)}}catch{toast('failed',false)}b.classList.remove('loading')}
+// close modal on overlay click
+document.addEventListener('click',function(e){if(e.target.id==='llm-modal')closeLLMModal()});
+const WALLET_CFG_SCHEMA={risk:['maxPositions','maxDeployAmount','maxSwapSol','hardStopLossPct','dailyMaxDrawdownSol'],screening:['minTvl','maxTvl','minTokenFeesSol','minHolders','minOrganic','minQuoteOrganic','maxTop10Pct','maxBundlePct','maxBotHoldersPct'],management:['stopLossPct','takeProfitPct','trailingTakeProfit','trailingTriggerPct','trailingDropPct','outOfRangeWaitMinutes','oorCooldownTriggerCount','oorCooldownHours','minSolToOpen','deployAmountSol','gasReserve','positionSizePct'],schedule:['screeningIntervalMin','managementIntervalMin']};
+async function editWalletConfig(id){const w=_WALLETS.find(x=>x.id===id);if(!w)return;_editingWalletId=id;document.getElementById('cfg-modal-title').textContent='Wallet Config: '+esc(w.name||w.address.slice(0,8));document.getElementById('cfg-modal-addr').textContent=w.address;let walletCfg={};try{const r=await api('/api/wallets/'+id+'/config');if(r.ok){const d=await r.json();walletCfg=d.config||{}}}catch{}const body=document.getElementById('cfg-modal-body');body.innerHTML=Object.entries(WALLET_CFG_SCHEMA).map(([section,keys])=>`<div class="cfg-section"><h4>${section}</h4><div class="config-grid">${keys.map(k=>{const v=walletCfg[section]?.[k];const placeholder=CONFIG?.[section]?.[k]!=null?'global: '+CONFIG[section][k]:'';return`<div class="config-row"><label>${k}</label><input type="text" id="wcfg-${section}-${k}" value="${v!=null&&v!==''?v:''}" placeholder="${esc(placeholder)}"></div>`}).join('')}</div></div>`).join('');document.getElementById('cfg-modal').classList.add('show')}
+function closeWalletCfgModal(){document.getElementById('cfg-modal').classList.remove('show');_editingWalletId=null}
+async function saveWalletConfig(){if(!_editingWalletId)return;const b=document.querySelector('#cfg-modal .btn-accent');b.classList.add('loading');const cfg={};for(const[section,keys]of Object.entries(WALLET_CFG_SCHEMA)){const s={};let has=false;for(const k of keys){const el=document.getElementById(`wcfg-${section}-${k}`);if(!el)continue;const v=el.value.trim();if(v!==''){const parsed=Number.isNaN(Number(v))?(v==='true'?true:v==='false'?false:v):Number(v);s[k]=parsed;has=true}}if(has)cfg[section]=s}try{const r=await api('/api/wallets/'+_editingWalletId+'/config',{method:'POST',body:JSON.stringify({config:cfg})});if(r.ok){toast('Wallet config saved',true);closeWalletCfgModal();fetchConfig()}else{const e=await r.json();toast(e.error||'save failed',false)}}catch{toast('save failed',false)}b.classList.remove('loading')}
+async function resetWalletConfig(){if(!_editingWalletId)return;if(!confirm('Reset all wallet overrides to global values?'))return;const b=document.querySelector('#cfg-modal .btn-accent');b.classList.add('loading');try{const r=await api('/api/wallets/'+_editingWalletId+'/config',{method:'POST',body:JSON.stringify({config:{}})});if(r.ok){toast('Wallet config reset to global',true);closeWalletCfgModal();fetchConfig()}else{const e=await r.json();toast(e.error||'reset failed',false)}}catch{toast('reset failed',false)}b.classList.remove('loading')}
+let _histRows=[],_histPage=0,_histSm={};const HIST_PER_PAGE=10;
+async function fetchHistory(){try{const w=document.getElementById('hist-wallet')?.value||'';const r=await api('/api/history'+(w?'?wallet='+encodeURIComponent(w):''));const d=await r.json();_histRows=d.history||[];_histPage=0;_histSm=d.summary||{};renderHistory(_histRows,_histSm)}catch{document.getElementById('history-body').innerHTML='<tr><td colspan="10" class="empty-state">Failed to load</td></tr>'}}
+function renderHistory(rows,sm){const tb=document.getElementById('history-body'),su=document.getElementById('hist-summary'),pg=document.getElementById('hist-pager');if(!rows.length){tb.innerHTML='<tr><td colspan="10" class="empty-state">No position history</td></tr>';su.textContent='';pg.style.display='none';return}su.textContent=rows.length+' positions | W:'+((sm.wins||0))+' L:'+((sm.losses||0))+' WR:'+((sm.winRate||0).toFixed(0))+'% Net:$'+((sm.totalPnlUsd||0).toFixed(2));const totalPages=Math.ceil(rows.length/HIST_PER_PAGE);if(_histPage>=totalPages)_histPage=totalPages-1;if(_histPage<0)_histPage=0;const start=_histPage*HIST_PER_PAGE,page=rows.slice(start,start+HIST_PER_PAGE);tb.innerHTML=page.map(h=>{const pc=(h.pnl_pct||0)>=0?'var(--green)':'var(--red)',uc=(h.pnl_usd||0)>=0?'var(--green)':'var(--red)',sc=h.status==='open'?'var(--cyan)':h.status==='externally_closed'?'var(--orange)':'var(--text-dim)',stxt=h.status==='open'?'OPEN':h.status==='externally_closed'?'EXT CLOSED':'CLOSED';return`<tr><td style="font-weight:700">${esc(h.pool||'')}</td><td>${esc(h.strategy||'')}</td><td>${(h.deploy_sol||0).toFixed(4)}</td><td style="color:${uc};font-weight:700">${(h.pnl_usd||0)>=0?'+':''}$${Math.abs(h.pnl_usd||0).toFixed(2)}</td><td style="color:${pc};font-weight:700">${(h.pnl_pct||0)>=0?'+':''}${(h.pnl_pct||0).toFixed(1)}%</td><td>$${(h.fees_usd||0).toFixed(2)}</td><td>${fmtMinutes(h.hold_minutes||0)}</td><td>${(h.peak_pnl||0).toFixed(1)}%</td><td style="color:${sc};font-weight:700;font-size:9px">${stxt}</td><td style="font-size:9px;color:var(--text-dim)">${esc(h.reason||'')}</td></tr>`}).join('');if(totalPages>1){pg.style.display='flex';document.getElementById('hist-page').textContent='Page '+(_histPage+1)+' / '+totalPages;document.getElementById('hist-prev').disabled=_histPage===0;document.getElementById('hist-next').disabled=_histPage>=totalPages-1}else{pg.style.display='none'}}
+function histPage(d){_histPage+=d;renderHistory(_histRows,_histSm)}
+function populateHistWallet(wallets){const s=document.getElementById('hist-wallet');if(!s)return;const v=s.value;s.innerHTML='<option value="">all wallets</option>'+wallets.map(w=>`<option value="${esc(w.address)}">${esc(w.name||w.address.slice(0,8)+'..')}</option>`).join('');if(v)s.value=v}
+
+// ── CHATBOX ──
+let _chatOpen = false;
+function toggleChat(){
+  _chatOpen = !_chatOpen;
+  document.getElementById('chat-panel').classList.toggle('open', _chatOpen);
+  if (_chatOpen) { loadChatHistory(); document.getElementById('chat-input').focus(); }
+}
+function closeChat(){_chatOpen=false;document.getElementById('chat-panel').classList.remove('open')}
+async function clearChat(){if(!confirm('Hapus semua percakapan?'))return;try{await api('/api/chat/history',{method:'DELETE'});document.getElementById('chat-messages').innerHTML='<div class="chat-empty">Percakapan dihapus.</div>';loadChatHistory()}catch{}}
+async function loadChatHistory(){try{const r=await api('/api/chat/history');const d=await r.json();const box=document.getElementById('chat-messages');if(!d.messages||!d.messages.length){box.innerHTML='<div class="chat-empty">Belum ada pesan. Tanya apa saja tentang pool, posisi, atau strategi.</div>';return}box.innerHTML=d.messages.map(m=>{const role=m.role==='user'?'chat-user':'chat-agent';const err=m.error?'chat-error':'';const meta=m.ms?`<span class="chat-meta">${m.ms}ms · ${m.steps||0} steps</span>`:'';return`<div class="chat-msg ${role} ${err}"><div class="chat-bubble">${esc(m.content)}</div>${meta}</div>`}).join('');box.scrollTop=box.scrollHeight}catch{}}
+async function sendChat(){
+  const input=document.getElementById('chat-input');
+  const msg=input.value.trim();
+  if(!msg)return;
+  input.value='';
+  const box=document.getElementById('chat-messages');
+  box.innerHTML+=`<div class="chat-msg chat-user"><div class="chat-bubble">${esc(msg)}</div></div>`;
+  box.innerHTML+=`<div class="chat-msg chat-agent chat-thinking"><div class="chat-bubble">⏳ Agent sedang berpikir...</div></div>`;
+  box.scrollTop=box.scrollHeight;
+  const sendBtn=document.getElementById('chat-send');
+  sendBtn.disabled=true;sendBtn.textContent='...';
+  try{
+    const r=await api('/api/chat',{method:'POST',body:JSON.stringify({message:msg})});
+    const thinkingEl=box.querySelector('.chat-thinking');
+    if(thinkingEl)thinkingEl.remove();
+    let d;
+    try {
+      const text=await r.text();
+      try { d=JSON.parse(text); } catch { throw new Error(`Server HTTP ${r.status}: ${text.slice(0,200)}`); }
+    } catch(pe){
+      box.innerHTML+=`<div class="chat-msg chat-agent chat-error"><div class="chat-bubble">⚠ ${esc(pe.message)}</div></div>`;
+      box.scrollTop=box.scrollHeight;
+      sendBtn.disabled=false;sendBtn.textContent='Send';
+      return;
+    }
+    if(d.reply){
+      box.innerHTML+=`<div class="chat-msg chat-agent"><div class="chat-bubble">${esc(d.reply)}</div><span class="chat-meta">${d.ms||0}ms · ${d.steps||0} tool calls</span></div>`;
+    }else if(d.error){
+      box.innerHTML+=`<div class="chat-msg chat-agent chat-error"><div class="chat-bubble">⚠ ${esc(d.error)}</div></div>`;
+    }
+    box.scrollTop=box.scrollHeight;
+  }catch(e){
+    const thinkingEl=box.querySelector('.chat-thinking');
+    if(thinkingEl)thinkingEl.remove();
+    box.innerHTML+=`<div class="chat-msg chat-agent chat-error"><div class="chat-bubble">⚠ ${esc(e.message)}</div></div>`;
+    box.scrollTop=box.scrollHeight;
+  }finally{sendBtn.disabled=false;sendBtn.textContent='Send'}
+}
+document.addEventListener('keydown',function(e){if(e.target.id==='chat-input'&&e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat()}});
+</script>
+<style>
+/* ── CHATBOX ── */
+#chat-fab{position:fixed;bottom:24px;right:24px;z-index:999;width:52px;height:52px;border-radius:50%;background:var(--accent);border:2px solid var(--accent-border);color:#0a0a0f;font-size:22px;cursor:pointer;box-shadow:0 4px 20px rgba(240,201,41,0.3);transition:transform 0.2s,box-shadow 0.2s;display:flex;align-items:center;justify-content:center}
+#chat-fab:hover{transform:scale(1.1);box-shadow:0 6px 28px rgba(240,201,41,0.5)}
+#chat-fab .badge{position:absolute;top:-4px;right:-4px;width:18px;height:18px;border-radius:50%;background:var(--red);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center}
+#chat-panel{position:fixed;bottom:88px;right:24px;z-index:998;width:420px;max-width:calc(100vw - 48px);height:520px;max-height:calc(100vh - 120px);background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,0.6);display:none;flex-direction:column;overflow:hidden}
+#chat-panel.open{display:flex}
+.chat-header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--surface-2);border-bottom:1px solid var(--border)}
+.chat-header .chat-title{font-size:12px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:1px}
+.chat-header .chat-subtitle{font-size:9px;color:var(--text-dim);margin-top:1px}
+.chat-header-btns{display:flex;gap:6px}
+.chat-hdr-btn{background:none;border:1px solid var(--border);color:var(--text-dim);font-size:10px;padding:2px 8px;border-radius:3px;cursor:pointer;font-family:var(--font)}
+.chat-hdr-btn:hover{color:var(--text);border-color:var(--border-soft)}
+.chat-hdr-btn.close:hover{color:var(--red);border-color:var(--red)}
+#chat-messages{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+#chat-messages::-webkit-scrollbar{width:4px}
+#chat-messages::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.chat-empty{color:var(--text-dim);font-size:11px;text-align:center;padding:40px 20px;line-height:1.8}
+.chat-msg{display:flex;flex-direction:column;gap:2px}
+.chat-msg.chat-user{align-items:flex-end}
+.chat-msg.chat-agent{align-items:flex-start}
+.chat-bubble{max-width:88%;padding:8px 12px;border-radius:8px;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.chat-user .chat-bubble{background:var(--accent-fill);border:1px solid var(--accent-border);color:var(--text);border-bottom-right-radius:2px}
+.chat-agent .chat-bubble{background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-bottom-left-radius:2px}
+.chat-agent.chat-error .chat-bubble{border-color:var(--red);background:var(--red-fill);color:var(--red)}
+.chat-meta{font-size:9px;color:var(--text-dim);margin-top:1px;padding:0 4px}
+.chat-input-area{display:flex;gap:6px;padding:10px 12px;border-top:1px solid var(--border);background:var(--surface-2)}
+#chat-input{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px 10px;color:var(--text);font-size:12px;font-family:var(--font);resize:none;outline:none;min-height:36px;max-height:80px}
+#chat-input:focus{border-color:var(--accent)}
+#chat-input::placeholder{color:var(--text-dim)}
+#chat-send{background:var(--accent);border:1px solid var(--accent-border);color:#0a0a0f;font-weight:700;font-size:11px;padding:0 14px;border-radius:4px;cursor:pointer;font-family:var(--font);text-transform:uppercase;letter-spacing:0.5px;transition:opacity 0.2s}
+#chat-send:hover{opacity:0.85}
+#chat-send:disabled{opacity:0.4;cursor:not-allowed}
+</style>
+<!-- CHAT FAB + PANEL -->
+<button id="chat-fab" onclick="toggleChat()" title="Chat with Agent">💬</button>
+<div id="chat-panel">
+  <div class="chat-header">
+    <div>
+      <div class="chat-title">PureXBT Agent Chat</div>
+      <div class="chat-subtitle">GENERAL role · full tool access</div>
+    </div>
+    <div class="chat-header-btns">
+      <button class="chat-hdr-btn" onclick="clearChat()" title="Clear history">Clear</button>
+      <button class="chat-hdr-btn close" onclick="closeChat()" title="Close">✕</button>
+    </div>
+  </div>
+  <div id="chat-messages"><div class="chat-empty">Loading...</div></div>
+  <div class="chat-input-area">
+    <textarea id="chat-input" placeholder="Tanya tentang pool, posisi, strategi..." rows="1"></textarea>
+    <button id="chat-send" onclick="sendChat()">Send</button>
+  </div>
+</div>
+</body>
+</html>
