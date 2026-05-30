@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>PureXBT — Agent Learning</title>
+<link rel="icon" type="image/svg+xml" href="logo.svg">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --font:'JetBrains Mono','Fira Code','Cascadia Code',ui-monospace,monospace;
+  --bg:#0A0A0A;--surface:#161616;--surface-2:#1C1C1C;--border:#333;
+  --text:#E8E8E8;--text-dim:#888;--accent:#ff4fb8;--accent-glow:rgba(255,79,184,0.1);
+  --green:#4ECB71;--green-fill:rgba(78,203,113,0.1);--red:#E85D5D;--red-fill:rgba(232,93,93,0.1);
+  --orange:#F0A050;--orange-fill:rgba(240,160,80,0.1);--cyan:#5CB8FF;
+  --radius:4px;
+}
+body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh;font-size:13px}
+.container{max-width:1100px;margin:0 auto;padding:20px 16px 40px}
+.header{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:18px;flex-wrap:wrap;gap:12px}
+.header-left h1{font-size:18px;font-weight:700;color:#fff}
+.header-left .sub{font-size:10px;color:var(--text-dim);margin-top:3px}
+.header-right{display:flex;gap:8px;align-items:center}
+.nav-btn{padding:6px 12px;border:1px solid var(--border);border-radius:4px;font-size:10px;font-weight:600;cursor:pointer;background:var(--surface-2);color:var(--text);font-family:var(--font);text-transform:uppercase;letter-spacing:0.5px;text-decoration:none}
+.nav-btn:hover{border-color:var(--accent);color:var(--accent)}
+.nav-btn.active{background:rgba(255,79,184,0.1);border-color:var(--accent);color:var(--accent)}
+.nav-btn.refresh{background:transparent;border-color:var(--accent);color:var(--accent)}
+.loading{text-align:center;padding:60px 20px;color:var(--text-dim);font-size:14px}
+.loading .dots{display:inline-block;animation:pulse 1.2s infinite}
+@keyframes pulse{0%,100%{opacity:0.3}50%{opacity:1}}
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px}
+.stat-label{font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;font-weight:600;margin-bottom:4px}
+.stat-value{font-size:22px;font-weight:700;line-height:1.15}
+.stat-value.green{color:var(--green)}.stat-value.red{color:var(--red)}.stat-value.accent{color:var(--accent)}.stat-value.orange{color:var(--orange)}
+.section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:14px;overflow:hidden}
+.section-title{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--accent);background:rgba(255,79,184,0.04);border-bottom:1px solid var(--border);cursor:pointer}
+.section-title .count{font-size:9px;color:var(--text-dim);font-weight:400;margin-left:6px}
+.section-title .toggle{font-size:11px;color:var(--text-dim);transition:transform 0.2s}
+.section-body{padding:10px 14px}
+.section-body.collapsed{display:none}
+
+/* Lesson cards */
+.lesson-card{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:8px}
+.lesson-card:last-child{margin-bottom:0}
+.lesson-header{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+.lesson-number{font-size:10px;font-weight:700;color:var(--accent);white-space:nowrap}
+.lesson-tags{display:flex;gap:4px;flex-wrap:wrap}
+.tag{font-size:8px;padding:2px 6px;border-radius:3px;font-weight:700;text-transform:uppercase;letter-spacing:0.3px}
+.tag-good{background:var(--green-fill);color:var(--green);border:1px solid rgba(78,203,113,0.2)}
+.tag-bad{background:var(--red-fill);color:var(--red);border:1px solid rgba(232,93,93,0.2)}
+.tag-evo{background:var(--orange-fill);color:var(--orange);border:1px solid rgba(240,160,80,0.2)}
+.tag-config{background:rgba(92,184,255,0.1);color:var(--cyan);border:1px solid rgba(92,184,255,0.2)}
+.tag-discord{background:rgba(255,79,184,0.1);color:var(--accent);border:1px solid rgba(255,79,184,0.2)}
+.tag-neutral{background:rgba(255,255,255,0.05);color:var(--text-dim);border:1px solid rgba(255,255,255,0.08)}
+.lesson-rule{font-size:12px;line-height:1.5;color:var(--text);margin-bottom:6px}
+.lesson-details{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:4px 12px;font-size:10px;color:var(--text-dim)}
+.lesson-details .detail-label{font-weight:600;color:var(--text-dim)}
+.lesson-details .detail-value{color:var(--text)}
+.lesson-details .pnl-pos{color:var(--green);font-weight:700}
+.lesson-details .pnl-neg{color:var(--red);font-weight:700}
+.lesson-context{font-size:10px;color:var(--text-dim);margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.04);line-height:1.4}
+
+/* Position table */
+.perf-table{width:100%;border-collapse:collapse;font-size:11px}
+.perf-table th{text-align:left;padding:6px 8px;color:var(--text-dim);font-size:9px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);font-weight:700;white-space:nowrap}
+.perf-table td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.04);white-space:nowrap}
+.perf-table tr:hover{background:rgba(255,255,255,0.02)}
+.perf-table .pnl-pos{color:var(--green);font-weight:700}
+.perf-table .pnl-neg{color:var(--red);font-weight:700}
+.perf-expand{cursor:pointer;color:var(--accent);font-size:10px}
+.perf-detail-row{display:none}
+.perf-detail-row.show{display:table-row}
+.perf-detail-row td{background:var(--surface-2);font-size:10px;color:var(--text-dim);padding:8px 12px;white-space:normal}
+.perf-detail-row .signal-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:2px 12px}
+.perf-detail-row .signal-grid span{font-size:10px}
+
+.chart-bar-row{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.chart-label{font-size:10px;color:var(--text-dim);min-width:80px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chart-count{font-size:10px;color:var(--text);min-width:40px}
+.bar-wrap{height:6px;background:rgba(255,255,255,0.05);border-radius:3px;overflow:hidden;flex:1;min-width:40px}
+.bar-fill{height:100%;border-radius:3px;transition:width 0.5s}
+.bar-fill.green{background:var(--green)}.bar-fill.red{background:var(--red)}.bar-fill.accent{background:var(--accent)}
+.pool-freq{display:flex;flex-wrap:wrap;gap:4px}
+.pool-chip{padding:3px 8px;border-radius:3px;font-size:10px;font-weight:600;border:1px solid var(--border);background:var(--surface-2)}
+.close-reason-bar{display:flex;gap:2px;height:20px;border-radius:3px;overflow:hidden;margin:6px 0}
+.close-seg{height:100%;min-width:2px}
+.filter-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.filter-btn{padding:4px 10px;border:1px solid var(--border);border-radius:3px;font-size:9px;font-weight:600;cursor:pointer;background:var(--surface-2);color:var(--text);font-family:var(--font);text-transform:uppercase}
+.filter-btn.active{background:rgba(255,79,184,0.1);border-color:var(--accent);color:var(--accent)}
+.filter-btn:hover{border-color:var(--accent)}
+@media(max-width:768px){
+  .stats-row{grid-template-columns:1fr 1fr}
+  .perf-table{font-size:9px}
+  .section-body{overflow-x:auto}
+  .lesson-details{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="header-left">
+      <h1>🧠 Agent Learning</h1>
+      <div class="sub" id="update-info">Loading...</div>
+    </div>
+    <div class="header-right">
+      <button class="nav-btn refresh" onclick="location.reload()">🔄 Refresh</button>
+      <a href="/" class="nav-btn">Dashboard</a>
+      <span class="nav-btn active">Learning</span>
+    </div>
+  </div>
+
+  <div id="loading" class="loading">Fetching agent knowledge<span class="dots">...</span></div>
+
+  <div id="content" style="display:none">
+    <div id="stats-row" class="stats-row"></div>
+
+    <!-- Performance Overview -->
+    <div class="section" id="perf-section">
+      <div class="section-title" onclick="toggleSection('perf-body')">📈 Performance Overview (PnL Distribution) <span class="toggle">▼</span></div>
+      <div class="section-body" id="perf-body"><div id="perf-chart"></div></div>
+    </div>
+
+    <!-- All Positions Table -->
+    <div class="section" id="positions-section">
+      <div class="section-title" onclick="toggleSection('pos-body')">📋 All Positions <span class="count" id="pos-count"></span> <span class="toggle">▼</span></div>
+      <div class="section-body" id="pos-body">
+        <div class="filter-row">
+          <button class="filter-btn active" onclick="filterPositions('all',this)">All</button>
+          <button class="filter-btn" onclick="filterPositions('win',this)">Winners</button>
+          <button class="filter-btn" onclick="filterPositions('loss',this)">Losers</button>
+        </div>
+        <div style="overflow-x:auto"><table class="perf-table" id="pos-table"></table></div>
+      </div>
+    </div>
+
+    <!-- Pool Stats -->
+    <div class="section" id="pool-section">
+      <div class="section-title" onclick="toggleSection('pool-body')">🏊 Pool Frequency <span class="toggle">▼</span></div>
+      <div class="section-body" id="pool-body"><div id="pool-freq"></div></div>
+    </div>
+
+    <!-- Close Reasons -->
+    <div class="section" id="close-section">
+      <div class="section-title" onclick="toggleSection('close-body')">🔚 Close Reason Distribution <span class="toggle">▼</span></div>
+      <div class="section-body" id="close-body"><div id="close-bars"></div></div>
+    </div>
+
+    <!-- Lessons Detail -->
+    <div class="section" id="lessons-section">
+      <div class="section-title" onclick="toggleSection('lessons-body')">📖 Lessons Learned <span class="count" id="lessons-count"></span> <span class="toggle">▼</span></div>
+      <div class="section-body" id="lessons-body">
+        <div class="filter-row">
+          <button class="filter-btn active" onclick="filterLessons('all',this)">All (36)</button>
+          <button class="filter-btn" onclick="filterLessons('good',this)">✅ PREFER</button>
+          <button class="filter-btn" onclick="filterLessons('bad',this)">❌ FAILED</button>
+          <button class="filter-btn" onclick="filterLessons('config',this)">🔧 Config Changes</button>
+          <button class="filter-btn" onclick="filterLessons('evolution',this)">🧬 Evolution</button>
+        </div>
+        <div id="lessons-list"></div>
+      </div>
+    </div>
+
+    <!-- Signal Weights -->
+    <div class="section" id="weights-section">
+      <div class="section-title" onclick="toggleSection('weights-body')">⚖️ Signal Weights <span class="toggle">▼</span></div>
+      <div class="section-body" id="weights-body"><div id="weights-table"></div></div>
+    </div>
+
+    <!-- Agent Knowledge MD -->
+    <div class="section" id="knowledge-section">
+      <div class="section-title" onclick="toggleSection('knowledge-body')">📚 Full Agent Knowledge (agentlearning.md) <span class="toggle">▼</span></div>
+      <div class="section-body" id="knowledge-body"><div class="knowledge-section" id="knowledge-text" style="font-size:12px;line-height:1.6;padding:14px"></div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '/api/learning';
+const KNOWLEDGE_API = '/api/learning/knowledge';
+let _allPerf = [], _allLessons = [];
+
+function toggleSection(id) {
+  document.getElementById(id).classList.toggle('collapsed');
+}
+
+async function init() {
+  try {
+    const [dataRes, knowledgeRes] = await Promise.all([fetch(API), fetch(KNOWLEDGE_API)]);
+    const json = await dataRes.json();
+    const data = json.data || json;
+    _allPerf = data.performance || [];
+    _allLessons = data.lessons || [];
+    let knowledgeText = '';
+    if (knowledgeRes.ok) knowledgeText = await knowledgeRes.text();
+
+    document.getElementById('update-info').textContent =
+      'Updated: ' + new Date().toLocaleTimeString() + ' | Auto-refresh 60s | Lessons: ' + _allLessons.length + ' | Positions: ' + _allPerf.length;
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('content').style.display = 'block';
+
+    renderStats(data.stats);
+    renderPerfChart(_allPerf);
+    renderPositions(_allPerf);
+    renderPoolFreq(_allPerf);
+    renderCloseReasons(_allPerf);
+    renderLessonsDetail(_allLessons);
+    if (data.weights) renderWeights(data.weights);
+    if (knowledgeText) renderKnowledge(knowledgeText);
+    document.getElementById('pos-count').textContent = '(' + _allPerf.length + ' records)';
+    document.getElementById('lessons-count').textContent = '(' + _allLessons.length + ' rules)';
+  } catch (err) {
+    document.getElementById('loading').innerHTML =
+      '<span style="color:var(--red)">Failed: ' + err.message + '</span><br><small>Make sure dev server is running on port 3001</small>';
+  }
+}
+
+function renderStats(stats) {
+  if (!stats) return;
+  document.getElementById('stats-row').innerHTML = [
+    {l:'Total Positions',v:stats.total_positions||'0',c:''},
+    {l:'Winners',v:stats.winners||'0',c:'green'},
+    {l:'Losers',v:stats.losers||'0',c:'red'},
+    {l:'Win Rate',v:(stats.win_rate||'0')+'%',c:parseFloat(stats.win_rate)>50?'green':'red'},
+    {l:'Best PnL',v:'+'+stats.best_pnl+'%',c:'green'},
+    {l:'Worst PnL',v:stats.worst_pnl+'%',c:'red'},
+    {l:'Avg Winner',v:'+'+stats.avg_winner_pnl+'%',c:'green'},
+    {l:'Avg Loser',v:stats.avg_loser_pnl+'%',c:'red'},
+  ].map(s => '<div class="stat-card"><div class="stat-label">'+s.l+'</div><div class="stat-value '+s.c+'">'+s.v+'</div></div>').join('');
+}
+
+function renderPerfChart(perf) {
+  if (!perf.length) return;
+  const sorted = [...perf].sort((a,b) => (a.pnl_pct||0)-(b.pnl_pct||0));
+  const maxAbs = Math.max(Math.abs(Math.min(...sorted.map(p=>p.pnl_pct||0))), Math.abs(Math.max(...sorted.map(p=>p.pnl_pct||0))))||1;
+  document.getElementById('perf-chart').innerHTML = sorted.map((p,i) => {
+    const pnl = p.pnl_pct||0;
+    const w = Math.abs(pnl)/maxAbs*110;
+    const bar = pnl>=0 ? '<div style="width:'+w+'px;margin-left:auto" class="bar-fill green"></div>' : '<div style="width:'+w+'px" class="bar-fill red"></div>';
+    return '<div class="chart-bar-row" title="#'+(i+1)+' '+p.pool_name+'"><span class="chart-label">'+p.pool_name+'</span><span class="chart-count" style="color:'+(pnl>=0?'var(--green)':'var(--red)')+'">'+(pnl>=0?'+':'')+pnl.toFixed(1)+'%</span><div class="bar-wrap" style="display:flex">'+bar+'</div><span style="font-size:9px;color:var(--text-dim);min-width:100px">'+(p.close_reason||'?')+'</span></div>';
+  }).join('');
+}
+
+function renderPositions(perf) {
+  if (!perf.length) return;
+  const rows = perf.map((p,i) => {
+    const pnl = (p.pnl_pct||0).toFixed(2);
+    const pnlCls = parseFloat(pnl)>=0?'pnl-pos':'pnl-neg';
+    const reason = (p.close_reason||'?').slice(0,60);
+    const date = p.closed_at ? new Date(p.closed_at).toLocaleDateString() : (p.opened_at ? new Date(p.opened_at).toLocaleDateString() : '?');
+    return '<tr class="perf-row" data-type="'+(parseFloat(pnl)>=0?'win':'loss')+'" onclick="this.nextElementSibling.classList.toggle(\'show\')">'+
+      '<td>'+(i+1)+'</td><td><strong>'+p.pool_name+'</strong></td><td>'+date+'</td>'+
+      '<td>'+p.strategy+'</td><td class="'+pnlCls+'">'+pnl+'%</td>'+
+      '<td>'+p.organic_score+'</td><td>'+(p.fee_tvl_ratio!=null?p.fee_tvl_ratio.toFixed(2)+'%':'?')+'</td>'+
+      '<td>'+p.volatility+'</td><td>'+p.bin_step+'</td>'+
+      '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+reason+'</td>'+
+      '<td class="perf-expand">▶</td></tr>'+
+      '<tr class="perf-detail-row"><td colspan="11"><div class="signal-grid">'+
+      '<span><strong>Pool:</strong> '+p.pool+'</span>'+
+      '<span><strong>Base Mint:</strong> '+((p.base_mint||'').slice(0,12)+'...')+'</span>'+
+      '<span><strong>Amount SOL:</strong> '+p.amount_sol+'</span>'+
+      '<span><strong>PnL USD:</strong> $'+(p.pnl_usd||0).toFixed(2)+'</span>'+
+      '<span><strong>Range Eff:</strong> '+p.range_efficiency+'%</span>'+
+      '<span><strong>Minutes Held:</strong> '+p.minutes_held+'</span>'+
+      '<span><strong>In Range:</strong> '+p.minutes_in_range+'m</span>'+
+      '<span><strong>Fee Earned:</strong> $'+(p.fees_earned_usd||0).toFixed(4)+'</span>'+
+      (p.bin_range ? '<span><strong>Bins:</strong> '+p.bin_range.min+' → '+p.bin_range.max+' (below:'+p.bin_range.bins_below+')</span>' : '')+
+      '</div>'+
+      (p.signal_snapshot ? '<div style="margin-top:6px;font-size:10px;color:var(--text-dim)"><strong>Signal Snapshot:</strong> organic='+p.signal_snapshot.organic_score+', fee_tvl='+p.signal_snapshot.fee_tvl_ratio+', vol='+p.signal_snapshot.volume+', mcap='+p.signal_snapshot.mcap+', holders='+p.signal_snapshot.holder_count+', wallets='+(p.signal_snapshot.smart_wallets_present?'yes':'no')+'</div>' : '')+
+      '</td></tr>';
+  });
+  document.getElementById('pos-table').innerHTML =
+    '<thead><tr><th>#</th><th>Pool</th><th>Date</th><th>Strategy</th><th>PnL</th><th>Organic</th><th>Fee/TVL</th><th>Vol</th><th>Bin Step</th><th>Close Reason</th><th></th></tr></thead><tbody>'+rows.join('')+'</tbody>';
+}
+
+function filterPositions(type, btn) {
+  document.querySelectorAll('#pos-body .filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.perf-row').forEach(r => {
+    if (type === 'all') { r.style.display = ''; return; }
+    r.style.display = r.dataset.type === type ? '' : 'none';
+  });
+  document.querySelectorAll('.perf-detail-row').forEach(r => r.classList.remove('show'));
+}
+
+function filterLessons(type, btn) {
+  document.querySelectorAll('#lessons-body .filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.lesson-card').forEach(card => {
+    if (type === 'all') { card.style.display = ''; return; }
+    if (type === 'good') { card.style.display = card.dataset.outcome === 'good' ? '' : 'none'; return; }
+    if (type === 'bad') { card.style.display = card.dataset.outcome === 'bad' ? '' : 'none'; return; }
+    if (type === 'config') { card.style.display = card.dataset.isConfig === 'true' ? '' : 'none'; return; }
+    if (type === 'evolution') { card.style.display = card.dataset.isEvo === 'true' ? '' : 'none'; return; }
+  });
+}
+
+function renderPoolFreq(perf) {
+  if (!perf.length) return;
+  const freq = {};
+  perf.forEach(p => { const n = p.pool_name||'?'; freq[n]=(freq[n]||0)+1; });
+  document.getElementById('pool-freq').innerHTML = Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,20).map(([n,c]) =>
+    '<span class="pool-chip">'+n+' <strong style="color:var(--accent)">x'+c+'</strong></span>'
+  ).join('');
+}
+
+function renderCloseReasons(perf) {
+  if (!perf.length) return;
+  const reasons = {};
+  perf.forEach(p => { const r = p.close_reason||'unknown'; reasons[r]=(reasons[r]||0)+1; });
+  const entries = Object.entries(reasons).sort((a,b)=>b[1]-a[1]);
+  const colors = ['#4ECB71','#ff4fb8','#E85D5D','#5CB8FF','#F0A050','#888','#666','#444','#333','#555'];
+  const total = entries.reduce((s,[,c])=>s+c,0);
+  document.getElementById('close-bars').innerHTML =
+    '<div class="close-reason-bar">'+entries.map(([,c],i)=>'<div class="close-seg" style="flex:'+c+';background:'+colors[i%colors.length]+'" title="'+entries[i][0]+': '+c+' ('+(c/total*100).toFixed(0)+'%)"></div>').join('')+'</div>'+
+    entries.map(([r,c],i)=>'<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;font-size:10px"><span style="width:10px;height:10px;border-radius:2px;background:'+colors[i%colors.length]+'"></span><span>'+r+'</span><span style="color:var(--text-dim)">'+c+' ('+(c/total*100).toFixed(0)+'%)</span></div>').join('');
+}
+
+function renderWeights(data) {
+  const w = data.weights || data;
+  if (!w) return;
+  const entries = Object.entries(w).sort((a,b)=>b[1]-a[1]);
+  const maxW = Math.max(...entries.map(([,v])=>v),1);
+  let html = entries.map(([name,val]) => {
+    const pct = (val/maxW*100).toFixed(0);
+    return '<div class="chart-bar-row"><span class="chart-label" style="min-width:170px;text-align:left">'+name+'</span><span style="font-size:11px;color:var(--accent)">'+val.toFixed(2)+'</span><div class="bar-wrap"><div class="bar-fill accent" style="width:'+pct+'%"></div></div></div>';
+  }).join('');
+  if (data.last_recalc) html += '<div style="margin-top:8px;font-size:10px;color:var(--text-dim)">Last recalc: '+data.last_recalc+' | Count: '+(data.recalc_count||0)+'</div>';
+  document.getElementById('weights-table').innerHTML = html;
+}
+
+function renderLessonsDetail(lessons) {
+  if (!lessons.length) return;
+  const sorted = [...lessons].sort((a,b) => (a.created_at||'').localeCompare(b.created_at||''));
+  const tags = l => l.tags || [];
+  const isGood = l => l.outcome === 'good';
+  const isBad = l => l.outcome === 'bad';
+  const isConfig = l => tags(l).some(t => t === 'config_change' || t === 'self_tune');
+  const isEvo = l => tags(l).some(t => t === 'evolution');
+
+  document.getElementById('lessons-list').innerHTML = sorted.map((l,i) => {
+    const tagHtml = (() => {
+      const t = tags(l);
+      const out = [];
+      if (isGood(l)) out.push('<span class="tag tag-good">PREFER</span>');
+      if (isBad(l)) out.push('<span class="tag tag-bad">FAILED</span>');
+      if (isEvo(l)) out.push('<span class="tag tag-evo">EVOLUTION</span>');
+      if (isConfig(l)) out.push('<span class="tag tag-config">CONFIG</span>');
+      t.filter(x => !['config_change','self_tune','evolution','performance'].includes(x)).forEach(x => out.push('<span class="tag tag-neutral">'+x+'</span>'));
+      if (l.sourceType === 'discord') out.push('<span class="tag tag-discord">DISCORD</span>');
+      return out.join('');
+    })();
+
+    const pnlHtml = l.pnl_pct != null
+      ? '<span class="detail-value '+(l.pnl_pct>=0?'pnl-pos':'pnl-neg')+'">'+(l.pnl_pct>=0?'+':'')+l.pnl_pct+'%</span>'
+      : '';
+
+    const details = [];
+    if (l.pool) details.push('<span><span class="detail-label">Pool:</span> <span class="detail-value">'+(l.pool_name||l.pool.slice(0,16)+'...')+'</span></span>');
+    if (l.confidence != null) details.push('<span><span class="detail-label">Confidence:</span> <span class="detail-value">'+(l.confidence*100).toFixed(0)+'%</span></span>');
+    if (pnlHtml) details.push('<span><span class="detail-label">PnL:</span> '+pnlHtml+'</span>');
+    if (l.range_efficiency != null) details.push('<span><span class="detail-label">Range Eff:</span> <span class="detail-value">'+l.range_efficiency+'%</span></span>');
+    if (l.close_reason) details.push('<span><span class="detail-label">Close:</span> <span class="detail-value">'+l.close_reason+'</span></span>');
+    if (l.fees_earned_usd != null) details.push('<span><span class="detail-label">Fees:</span> <span class="detail-value">$'+l.fees_earned_usd.toFixed(4)+'</span></span>');
+    if (l.initial_value_usd != null) details.push('<span><span class="detail-label">Init Value:</span> <span class="detail-value">$'+l.initial_value_usd.toFixed(2)+'</span></span>');
+    if (l.sourceType) details.push('<span><span class="detail-label">Source:</span> <span class="detail-value">'+l.sourceType+'</span></span>');
+    const date = l.created_at ? new Date(l.created_at).toLocaleString() : '';
+
+    return '<div class="lesson-card" data-outcome="'+(l.outcome||'')+'" data-is-config="'+isConfig(l)+'" data-is-evo="'+isEvo(l)+'">'+
+      '<div class="lesson-header">'+
+        '<span class="lesson-number">Lesson #'+(i+1)+' · '+date+'</span>'+
+        '<div class="lesson-tags">'+tagHtml+'</div>'+
+      '</div>'+
+      '<div class="lesson-rule">'+l.rule+'</div>'+
+      (details.length ? '<div class="lesson-details">'+details.join('')+'</div>' : '')+
+      (l.context ? '<div class="lesson-context">Context: '+l.context+'</div>' : '')+
+    '</div>';
+  }).join('');
+}
+
+function renderKnowledge(text) {
+  if (!text) return;
+  const div = document.getElementById('knowledge-text');
+  let html = text
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/## (.+)/g,'<h2 style="font-size:14px;color:var(--accent);margin:16px 0 8px;border-bottom:1px solid var(--border)">$1</h2>')
+    .replace(/### (.+)/g,'<h3 style="font-size:12px;color:var(--text);margin:12px 0 6px">$1</h3>')
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/`([^`]+)`/g,'<code style="font-size:11px;background:rgba(255,255,255,0.05);padding:1px 5px;border-radius:3px">$1</code>')
+    .replace(/^- (.+)/gm,'<li style="margin-left:20px">$1</li>')
+    .replace(/\n\n/g,'<br><br>').replace(/\n/g,'<br>');
+  div.innerHTML = html;
+}
+
+init();
+setInterval(init, 60000);
+</script>
+</body>
+</html>

@@ -18,7 +18,32 @@ Since the initial release, PureXBT has been significantly upgraded:
 - **Dashboard Chatbox** — floating chat panel talks to the agent with full tool access (deploy, close, discover, get_positions, get_pnl, get_balance). Bilingual — understands English and Indonesian commands.
 - **Position History Table** — full position history with PnL $, PnL %, fees, hold duration, peak PnL, status (OPEN/CLOSED/EXT CLOSED), and close reason. Filterable per wallet with pagination.
 - **On-Chain Reconciliation** — positions closed manually via Meteora UI are automatically detected as `externally_closed`. PnL is estimated from pool-memory snapshots.
-- **Feedback Injection** — pattern-aware decision summary (win rate, cumulative PnL, loss patterns) injected into the SCREENER system prompt.
+- **PnL Reconciliation** — background job (hourly) that backfills zero/unsettled PnL records from Meteora's on-chain closed-positions API. Dashboard button for manual trigger. Ensures position history data matches on-chain reality 1:1.
+- **Discord Signal Integration** — local Discord listener writes signals to `discord-signals.json`. Agent has `get_discord_signals` + `get_author_stats` tools. Signal metadata (author, channel, rug_score) tracked in lessons. Automatic deployer block on -15%+ losers.
+- **Learning Page** (`/learning`) — live dashboard showing all lessons, performance stats, pool frequency, close reason distribution, signal weights, and agent knowledge. Auto-refresh every 60s.
+- **Dashboard UI Terminal Theme** — pure black + pink terminal aesthetic. JetBrains Mono font. 3-column layout with fixed sidebar and right metrics panel. Performance chart with interactive tooltips and period filters (6h/1d/7d/14d/1m).
+- **Fee Auto-Compound** — claimed fees auto-swap back to SOL for redeployment. Compound effect: wallet grows → position sizes scale up automatically.
+
+### Trading Logic
+- **6 Deterministic Close Rules**: Stop-loss (R1), Take-profit (R2), OOR pump (R3), OOR timeout (R4), Low yield (R5), Fee/TVL decay (R6). Rules 1-2 bypass LLM entirely for instant execution.
+- **OOR Loss Prevention (3 Layers)**: (1) Penalty score in screening for low fee/TVL + low organic pools, (2) Adaptive bins_below for weak pools, (3) Fast 10-min OOR exit for risky pools vs 25-min standard.
+- **Signal Weights (Darwinian)** — `signal-weights.json` evolves weights per signal based on win/loss history. Applied multiplicatively to screening scores.
+- **Deployer Auto-Block** — deployers of positions losing >15% are auto-added to `dev-blocklist.json`.
+
+### Agent Learning
+- **10-Parameter Auto-Evolution** — screening thresholds (fee/TVL, organic, volume, holders, mcap, bin_step, token_fees) auto-tune based on winner vs loser patterns.
+- **Lesson Deduplication** — 75% similarity threshold. Near-duplicate lessons merged, confidence tracked.
+- **Confidence Decay** — lessons lose influence over 7-day half-life. Pinned lessons exempt. Pruned after 30 days.
+
+### Discord Signals
+- **Local processing** — reads `discord-signals.json`, no remote API dependency.
+- **Author accuracy tracking** — `get_author_stats` tool groups performance by Discord signal author.
+- **Rug score hard reject** — pool-scorer applies -200 penalty for rug_score >= 70.
+
+### HiveMind
+- **Pull-only mode** — agent learns from HiveMind community but does NOT push its own data.
+- **Export/import** — manual lesson sharing between agents via `shared-lessons.json`.
+- **Cache fallback** — falls back to cached lessons if HiveMind API is unreachable.
 
 ### Optimizations
 - **Context Compression** — raw JSON replaced with structured 1-line summaries in prompts. ~50-70% fewer tokens per ReAct step.
@@ -38,7 +63,7 @@ Since the initial release, PureXBT has been significantly upgraded:
 - **`_env` wallet not found** — primary wallet resolved correctly.
 - **LLM model override** — `user-config.json` no longer silently overrides `.env`.
 
-> **24 optimizations total** — token (-70%), latency (parallel + cache), reliability (retry/timeout/error handling), trading logic (stop-loss/OOR/screening).
+> **35+ optimizations total** — token (-70%), latency (parallel + cache), reliability (retry/timeout/error handling), trading logic (6 deterministic close rules, OOR prevention, decay monitor).
 
 ---
 

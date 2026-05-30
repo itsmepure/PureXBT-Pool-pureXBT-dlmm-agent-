@@ -5,7 +5,7 @@ import { executeTool } from "./tools/executor.js";
 import { tools } from "./tools/definitions.js";
 
 const MANAGER_TOOLS  = new Set(["close_position", "claim_fees", "swap_token", "get_position_pnl", "get_my_positions", "get_wallet_balance", "get_wallet_positions"]);
-const SCREENER_TOOLS = new Set(["deploy_position", "get_active_bin", "get_token_holders", "get_wallet_balance", "get_my_positions", "get_wallet_positions"]);
+const SCREENER_TOOLS = new Set(["deploy_position", "get_active_bin", "get_token_holders", "get_wallet_balance", "get_my_positions", "get_wallet_positions", "get_discord_signals", "get_author_stats"]);
 const GENERAL_INTENT_ONLY_TOOLS = new Set([
   "self_update",
   "update_config",
@@ -49,12 +49,13 @@ const INTENT_TOOLS = {
   balance:     new Set(["get_wallet_balance", "get_my_positions", "get_wallet_positions"]),
   positions:   new Set(["get_my_positions", "get_position_pnl", "get_wallet_balance", "set_position_note", "get_wallet_positions"]),
   strategy:    new Set(["list_strategies", "get_strategy", "add_strategy", "update_strategy", "delete_strategy", "remove_strategy", "set_active_strategy"]),
-  screen:      new Set(["get_top_candidates", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "check_smart_wallets_on_pool", "get_pool_detail", "get_my_positions", "discover_pools"]),
+  screen:      new Set(["get_top_candidates", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "check_smart_wallets_on_pool", "get_pool_detail", "get_my_positions", "discover_pools", "get_discord_signals", "get_author_stats"]),
   memory:      new Set(["get_pool_memory", "add_pool_note", "list_blacklist", "add_to_blacklist", "remove_from_blacklist"]),
   smartwallet: new Set(["add_smart_wallet", "remove_smart_wallet", "list_smart_wallets", "check_smart_wallets_on_pool"]),
   study:       new Set(["study_top_lpers", "get_top_lpers", "get_pool_detail", "search_pools", "get_token_info", "discover_pools", "add_smart_wallet", "list_smart_wallets"]),
   performance: new Set(["get_performance_history", "get_my_positions", "get_position_pnl"]),
   lessons:     new Set(["add_lesson", "pin_lesson", "unpin_lesson", "list_lessons", "clear_lessons"]),
+  discord:     new Set(["get_discord_signals", "get_author_stats", "add_lesson"]),
 };
 
 const INTENT_PATTERNS = [
@@ -75,6 +76,7 @@ const INTENT_PATTERNS = [
   { intent: "study",       re: /\b(study top|top lpers?|best lpers?|who.?s lping|lp behavior|lpers?|pelajari|studi)\b/i },
   { intent: "performance", re: /\b(performance|history|how.?s the bot|how.?s it doing|stats|report|performa|kinerja|laporan|bagaimana)\b/i },
   { intent: "lessons",     re: /\b(lesson|learned|teach|pin|unpin|clear lesson|what did you learn|pelajaran|pembelajaran|yang dipelajari)\b/i },
+  { intent: "discord",     re: /\b(discord|signal|lp army|metlex|sinyal)\b/i },
 ];
 
 function getToolsForRole(agentType, goal = "") {
@@ -113,7 +115,7 @@ function getClient() {
 const DEFAULT_MODEL = process.env.LLM_MODEL || "openrouter/healer-alpha";
 
 const MUTATING_TOOL_INTENTS = /\b(deploy|open position|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|add smart wallet|remove smart wallet|add wallet|remove wallet|pin|unpin|clear lesson|add lesson|set active strategy|remove strategy|add strategy|set |change |update |self.?update|pull latest|git pull|update yourself|buka posisi|tutup|keluar|tarik|cabut|hentikan|klaim|tukar|jual|beli|konversi|blokir|pasang|daftar hitam|tambah wallet|hapus wallet)\b/i;
-const LIVE_DATA_TOOL_INTENTS = /\b(balance|wallet|position|portfolio|pnl|yield|range|show positions|open positions|screen|candidate|find pool|search|research|analyze|check pool|token holders|narrative|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|list smart wallets|list blacklist|list blocked deployers|list lessons|saldo|cek|posisi|portofolio|cari|pool|scan|skrining|performa|kinerja|laporan|pelajaran|strategi|riwayat|kapan|apa|bagaimana|gimana|daftar|tampilkan|liat|lihat)\b/i;
+const LIVE_DATA_TOOL_INTENTS = /\b(balance|wallet|position|portfolio|pnl|yield|range|show positions|open positions|screen|candidate|find pool|search|research|analyze|check pool|token holders|narrative|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|list smart wallets|list blacklist|list blocked deployers|list lessons|saldo|cek (?:saldo|balance|wallet|sol)|posisi terbuka|posisi saat ini|posisi|portofolio|cari pool|scan|skrining|performa|kinerja|laporan|pelajaran|strategi|riwayat)\b/i;
 const CONFIG_READ_ONLY_INTENTS = /\b(check|show|what(?:'s| is)?|review|inspect|see)\b.*\b(config|settings?|thresholds?)\b/i;
 const DECISION_EXPLANATION_INTENTS = /\b(why did you|why'd you|why was (?:this|that|it)|what made you|what was the reason|why no deploy|why didn't you deploy|why did you close|why did you deploy|why did you skip)\b/i;
 

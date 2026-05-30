@@ -23,6 +23,7 @@ import {
   minutesOutOfRange,
   syncOpenPositions,
 } from "../state.js";
+import { markPoolOpened } from "../pool-memory.js";
 import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
@@ -703,6 +704,15 @@ export async function deployPosition({
           initial_value_usd,
           signal_snapshot: signalSnapshot,
         });
+        // Record open deploy in pool-memory so screener sees pool history
+        markPoolOpened(pool_address, {
+          pool_name,
+          base_mint: baseMint,
+          position: positionAddress,
+          strategy: activeStrategy,
+          volatility: normalizedVolatility,
+          amount_sol: finalAmountY,
+        });
       }
 
       appendDecision({
@@ -840,6 +850,15 @@ export async function deployPosition({
       active_bin: activeBin.binId,
       initial_value_usd,
       signal_snapshot: signalSnapshot,
+    });
+    // Record open deploy in pool-memory so screener sees pool history
+    markPoolOpened(pool_address, {
+      pool_name,
+      base_mint: baseMint,
+      position: newPosition.publicKey.toString(),
+      strategy: activeStrategy,
+      volatility: normalizedVolatility,
+      amount_sol: finalAmountY,
     });
 
     appendDecision({
@@ -1051,6 +1070,9 @@ const PERFORMANCE_SIGNAL_FIELDS = [
   "study_win_rate",
   "hive_consensus",
   "volatility",
+  "discord_author",
+  "discord_channel",
+  "discord_signal_count",
 ];
 
 function resolvePerformanceSignalSnapshot({ poolAddress, baseMint, tracked }) {

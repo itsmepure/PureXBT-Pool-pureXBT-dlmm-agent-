@@ -11,6 +11,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { deriveAddress } from "./tools/wallet.js";
+import { markPoolClosed } from "./pool-memory.js";
 
 const STATE_FILE = "./state.json";
 
@@ -516,6 +517,12 @@ export function syncOpenPositions(active_addresses) {
     pos.notes.push(`Auto-closed during state sync (not found on-chain)`);
     changed = true;
     log("state", `Position ${posId} auto-closed (missing from on-chain data)`);
+    // Set cooldown in pool-memory to prevent immediate re-deploy
+    markPoolClosed(pos.pool, {
+      reason: "externally_closed",
+      cooldownHours: 4,
+      base_mint: pos.base_mint || null,
+    });
   }
 
   if (changed) save(state);

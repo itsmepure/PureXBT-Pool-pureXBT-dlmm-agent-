@@ -12,7 +12,7 @@ agent.js            ReAct loop (OpenRouter/OpenAI-compatible): LLM → tool call
 config.js           Runtime config from user-config.json + .env; exposes config object
 prompt.js           Builds system prompt per agent role (SCREENER / MANAGER / GENERAL)
 state.js            Position registry (state.json): tracks bin ranges, OOR timestamps, notes
-lessons.js          Learning engine: records closed-position perf, derives lessons, evolves thresholds
+lessons.js          Learning engine: records closed-position perf, derives lessons, evolves thresholds, reconciles unsettled PnL from on-chain API
 pool-memory.js      Per-pool deploy history + snapshots (pool-memory.json)
 strategy-library.js Saved LP strategies (strategy-library.json)
 briefing.js         Daily Telegram briefing (HTML)
@@ -194,13 +194,29 @@ const actualBaseFee = baseFactor > 0
 - `getLessonsForPrompt({ agentType })` — injects relevant lessons into system prompt
 - `evolveThresholds()` — adjusts screening thresholds based on winners vs losers
 - Performance recorded via `recordPerformance()` called from executor.js after `close_position`
-- **Known issue**: `evolveThresholds()` references `maxVolatility` and `minFeeTvlRatio` but config.js uses `minFeeActiveTvlRatio` and has no `maxVolatility` key — the evolution of these keys is a no-op
+- `evolveThresholds()` adapts `minFeeActiveTvlRatio` and `minOrganic` (verified working)
+- Only 2 of ~15 screening params are evolved — candidates for expansion: `minVolume`, `minHolders`, `minMcap`, `maxBundlersPct`
 
 ---
 
 ## HiveMind
 
 Agent Meridian HiveMind sync is handled by `hivemind.js`. It uses built-in Agent Meridian defaults unless overridden by config or env.
+
+---
+
+## PnL Reconciliation
+
+`lessons.js` exports `reconcileClosedPnl(walletAddress)` which:
+
+1. Scans all performance records for entries where `final_value_usd === 0` (Meteora API hadn't settled when the position was closed)
+2. Re-fetches from `dlmm.datapi.meteora.ag/positions/{pool}/pnl?status=closed`
+3. Updates `pnl_usd`, `fees_earned_usd`, `final_value_usd`, `initial_value_usd` with on-chain data
+4. Tags updated records with `_reconciled_at` timestamp
+
+**Triggers:**
+- **Auto**: hourly health check in `index.js` (best-effort, never blocks)
+- **Manual**: `POST /api/reconcile` via dashboard UI button "↻ reconcile" in Activity Stats
 
 ---
 
@@ -224,5 +240,6 @@ Agent Meridian HiveMind sync is handled by `hivemind.js`. It uses built-in Agent
 
 ## Known Issues / Tech Debt
 
-- `lessons.js evolveThresholds()` evolves `maxVolatility` + `minFeeTvlRatio` (wrong key names — should be `minFeeActiveTvlRatio`; `maxVolatility` doesn't exist in config at all). The evolution is a no-op for those keys.
-- `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.
+- `get_wallet_positions` tool is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.
+- Lesson deduplication and confidence decay are implemented but lesson count still grows unbounded over long runs.
+- Dashboard `handleStats` uses lessons.json `performance[]` for PnL/fees — historical accuracy depends on Meteora API settling; hourly `reconcileClosedPnl()` backfills missing data.

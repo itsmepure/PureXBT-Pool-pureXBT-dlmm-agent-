@@ -11,7 +11,7 @@ import {
 } from "./dlmm.js";
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
-import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
+import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, getAuthorStats } from "../lessons.js";
 import { setPositionInstruction } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
@@ -234,6 +234,61 @@ function normalizeConfigValue(key, value) {
   return coerceFiniteNumber(value, key);
 }
 
+// ─── Discord Signals Reader ───────────────────────────────────
+const DISCORD_SIGNALS_FILE = path.join(__dirname, "..", "discord-signals.json");
+
+function getDiscordSignals({ limit = 10 } = {}) {
+  const maxLimit = Math.min(Math.max(1, Number(limit) || 10), 50);
+
+  if (!fs.existsSync(DISCORD_SIGNALS_FILE)) {
+    return {
+      success: true,
+      signals: [],
+      count: 0,
+      disclaimer: "No Discord signals found. The discord-listener may not be running or has not captured any signals yet.",
+    };
+  }
+
+  let signals;
+  try {
+    signals = JSON.parse(fs.readFileSync(DISCORD_SIGNALS_FILE, "utf8"));
+  } catch {
+    return { success: false, error: "Could not parse discord-signals.json" };
+  }
+
+  if (!Array.isArray(signals) || signals.length === 0) {
+    return {
+      success: true,
+      signals: [],
+      count: 0,
+      disclaimer: "Discord signals file exists but contains no signals.",
+    };
+  }
+
+  const pending = signals
+    .filter((s) => s.status === "pending")
+    .slice(0, maxLimit)
+    .map((s) => ({
+      pool_address: s.pool_address,
+      base_mint: s.base_mint,
+      base_symbol: s.base_symbol,
+      discord_author: s.discord_author,
+      discord_channel: s.discord_channel,
+      rug_score: s.rug_score,
+      total_fees_sol: s.total_fees_sol,
+      token_age_minutes: s.token_age_minutes,
+      queued_at: s.queued_at,
+    }));
+
+  return {
+    success: true,
+    signals: pending,
+    count: pending.length,
+    total_in_file: signals.length,
+    disclaimer: "DISCORD SIGNALS ARE REFERENCE ONLY — NOT confirmed buy signals. Always cross-check with your own screening (organic score, holders, fees, volume) before deploying. Never deploy solely because a Discord signal exists.",
+  };
+}
+
 // Map tool names to implementations
 const toolMap = {
   discover_pools: discoverPools,
@@ -298,6 +353,8 @@ const toolMap = {
   remove_strategy:     removeStrategy,
   get_pool_memory: getPoolMemory,
   add_pool_note: addPoolNote,
+  get_discord_signals: getDiscordSignals,
+  get_author_stats: getAuthorStats,
   add_to_blacklist: addToBlacklist,
   remove_from_blacklist: removeFromBlacklist,
   list_blacklist: listBlacklist,
@@ -654,8 +711,13 @@ export async function executeTool(name, args) {
             const balances = await getWalletBalances({});
             const token = balances.tokens?.find(t => t.mint === result.base_mint);
             if (token && token.usd >= 0.10) {
-              log("executor", `Auto-swapping claimed ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-              await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
+              log("executor", `Auto-compound: swapping claimed ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL for redeploy`);
+              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
+              if (swapResult?.amount_out) {
+                log("executor", `Auto-compound: received ${swapResult.amount_out} SOL — will be used in next screening cycle`);
+                result.auto_compounded = true;
+                result.compound_sol = swapResult.amount_out;
+              }
             }
           } catch (e) {
             log("executor_warn", `Auto-swap after claim failed: ${e.message}`);

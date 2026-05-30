@@ -5,6 +5,7 @@ import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
+import { loadWeights } from "../signal-weights.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -26,16 +27,74 @@ const PVP_MIN_ACTIVE_TVL = 5_000;
 const PVP_MIN_HOLDERS = 500;
 const PVP_MIN_GLOBAL_FEES_SOL = 30;
 
+/* ── Cached signal weights (refreshed every 60s from disk) ── */
+let _cachedWeights = null;
+let _weightsLoadedAt = 0;
+const WEIGHTS_TTL_MS = 60_000;
+
+function getCachedWeights() {
+  const now = Date.now();
+  if (!_cachedWeights || now - _weightsLoadedAt > WEIGHTS_TTL_MS) {
+    try {
+      const data = loadWeights();
+      _cachedWeights = data?.weights ?? {};
+    } catch { _cachedWeights = {}; }
+    _weightsLoadedAt = now;
+  }
+  return _cachedWeights;
+}
+
 function normalizeSymbol(symbol) {
   return String(symbol || "").trim().toUpperCase();
 }
 
+/* ── OOR Risk Penalty — penalties for pools likely to go OOR ── */
+const OOR_PENALTY = {
+  FEE_TVL_RISK: 0.08,       // fee/TVL < this → high OOR risk
+  ORGANIC_RISK: 72,         // organic < this → high OOR risk
+  VOLUME_FLOOR: 2000,       // volume < this → needs extra check
+  FEE_TVL_MILD: 0.10,       // mild threshold for vol+ftvl combo
+  BOTH_PENALTY: 0.35,       // both triggers → extreme
+  FEE_ONLY_PENALTY: 0.5,    // fee/TVL risk only
+  ORG_ONLY_PENALTY: 0.7,    // organic risk only
+  MILD_PENALTY: 0.8,        // low vol + weak fee/TVL
+};
+
+function computeOorPenalty(pool) {
+  const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
+  const organic = Number(pool.organic_score || 0);
+  const volume = Number(pool.volume_window || 0);
+  let penalty = 1.0;
+
+  if (feeTvl < OOR_PENALTY.FEE_TVL_RISK && organic < OOR_PENALTY.ORGANIC_RISK) {
+    penalty *= OOR_PENALTY.BOTH_PENALTY;
+  } else {
+    if (feeTvl < OOR_PENALTY.FEE_TVL_RISK) penalty *= OOR_PENALTY.FEE_ONLY_PENALTY;
+    if (organic < OOR_PENALTY.ORGANIC_RISK) penalty *= OOR_PENALTY.ORG_ONLY_PENALTY;
+  }
+  if (volume < OOR_PENALTY.VOLUME_FLOOR && feeTvl < OOR_PENALTY.FEE_TVL_MILD) {
+    penalty *= OOR_PENALTY.MILD_PENALTY;
+  }
+
+  return penalty;
+}
+
 function scoreCandidate(pool) {
+  const w = getCachedWeights();
   const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
   const organic = Number(pool.organic_score || 0);
   const volume = Number(pool.volume_window || 0);
   const holders = Number(pool.holders || 0);
-  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+  const mcap = Number(pool.mcap || 0);
+  const baseScore = (
+    feeTvl * 1000 * (w.fee_tvl_ratio ?? 1) +
+    organic * 10 * (w.organic_score ?? 1) +
+    volume / 100 * (w.volume ?? 1) +
+    holders / 100 * (w.holder_count ?? 1) +
+    mcap / 10000 * (w.mcap ?? 1)
+  );
+  const penalty = computeOorPenalty(pool);
+  return baseScore * penalty;
 }
 
 function numeric(value) {
@@ -147,12 +206,65 @@ function getRawPoolScreeningRejectReason(pool, s) {
 }
 
 async function fetchDiscordSignalCandidates() {
-  const res = await fetch(`${getAgentMeridianBase()}/signals/discord/candidates`, {
-    headers: getAgentMeridianHeaders(),
-  });
-  if (!res.ok) throw new Error(`discord signal candidates ${res.status}`);
-  const data = await res.json();
-  return Array.isArray(data?.candidates) ? data.candidates : [];
+  // Read from local discord-signals.json (written by discord-listener PM2 process)
+  const fs = require("fs");
+  const path = require("path");
+  const signalsPath = path.join(__dirname, "..", "discord-signals.json");
+  let signals = [];
+  try {
+    if (fs.existsSync(signalsPath)) {
+      signals = JSON.parse(fs.readFileSync(signalsPath, "utf8"));
+    }
+  } catch { signals = []; }
+
+  // Filter pending signals only
+  const pending = signals.filter((s) => s.status === "pending");
+
+  // Transform into format expected by merge logic (candidate.discovery_pool.*)
+  // Group by pool_address to aggregate signal counts
+  const byPool = new Map();
+  for (const sig of pending) {
+    if (!sig.pool_address) continue;
+    const existing = byPool.get(sig.pool_address);
+    if (existing) {
+      existing.source_count += 1;
+      existing.seen_count += 1;
+      const ts = sig.queued_at ? new Date(sig.queued_at).getTime() : Date.now();
+      if (!existing.first_seen_at || ts < new Date(existing.first_seen_at).getTime()) {
+        existing.first_seen_at = sig.queued_at;
+      }
+      if (!existing.last_seen_at || ts > new Date(existing.last_seen_at).getTime()) {
+        existing.last_seen_at = sig.queued_at;
+      }
+      // Track all authors for this pool
+      if (sig.discord_author && !existing.authors.includes(sig.discord_author)) {
+        existing.authors.push(sig.discord_author);
+      }
+    } else {
+      byPool.set(sig.pool_address, {
+        discovery_pool: {
+          pool_address: sig.pool_address,
+          base_mint: sig.base_mint,
+          base_symbol: sig.base_symbol,
+        },
+        source_count: 1,
+        seen_count: 1,
+        first_seen_at: sig.queued_at || null,
+        last_seen_at: sig.queued_at || null,
+        // Carry metadata for scoring/lessons
+        _discord_meta: {
+          authors: [sig.discord_author || "unknown"],
+          rug_score: sig.rug_score ?? null,
+          total_fees_sol: sig.total_fees_sol ?? null,
+          token_age_minutes: sig.token_age_minutes ?? null,
+          channel: sig.discord_channel || null,
+          signal_ids: [sig.id],
+        },
+      });
+    }
+  }
+
+  return Array.from(byPool.values());
 }
 
 async function fetchPoolDiscoveryPage({ page_size, filters, timeframe, category }) {
@@ -432,6 +544,8 @@ export async function discoverPools({
           discord_signal_seen_count: candidate.seen_count || 1,
           discord_signal_first_seen_at: candidate.first_seen_at || null,
           discord_signal_last_seen_at: candidate.last_seen_at || null,
+          // Carry discord metadata for scoring/lessons (authors, rug_score, etc.)
+          discord_meta: candidate._discord_meta || null,
         };
       })
       .filter(Boolean);
@@ -452,6 +566,7 @@ export async function discoverPools({
             discord_signal_seen_count: signalPool.discord_signal_seen_count,
             discord_signal_first_seen_at: signalPool.discord_signal_first_seen_at,
             discord_signal_last_seen_at: signalPool.discord_signal_last_seen_at,
+            discord_meta: signalPool.discord_meta,
           });
         } else {
           byPool.set(signalPool.pool_address, signalPool);

@@ -49,7 +49,17 @@ const CATEGORICAL_SIGNALS = new Set(["narrative_quality"]);
 
 // ─── Persistence ─────────────────────────────────────────────────
 
-function loadWeights() {
+function saveWeights(data) {
+  try {
+    fs.writeFileSync(WEIGHTS_FILE, JSON.stringify(data, null, 2));
+  } catch (err) {
+    log("signal_weights_error", `Failed to write signal-weights.json: ${err.message}`);
+  }
+}
+
+// ─── Core Algorithm ──────────────────────────────────────────────
+
+export function loadWeights() {
   if (!fs.existsSync(WEIGHTS_FILE)) {
     const initial = {
       weights: { ...DEFAULT_WEIGHTS },
@@ -74,23 +84,6 @@ function loadWeights() {
   }
 }
 
-function saveWeights(data) {
-  try {
-    fs.writeFileSync(WEIGHTS_FILE, JSON.stringify(data, null, 2));
-  } catch (err) {
-    log("signal_weights_error", `Failed to write signal-weights.json: ${err.message}`);
-  }
-}
-
-// ─── Core Algorithm ──────────────────────────────────────────────
-
-/**
- * Recalculate signal weights based on actual position performance.
- *
- * @param {Array}  perfData - Array of performance records (from lessons.json)
- * @param {Object} cfg      - Live config object (reads cfg.darwin for tuning)
- * @returns {{ changes: Array, weights: Object }}
- */
 export function recalculateWeights(perfData, cfg = {}) {
   const darwin = cfg.darwin || {};
   const windowDays    = darwin.windowDays    ?? 60;

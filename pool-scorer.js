@@ -88,6 +88,11 @@ function scoreCandidate(c) {
   // Discord signal (community strength)
   if (c.discord_signal) score += 8;
 
+  // Discord signal: hard reject if rug_score is high (pre-checks flag)
+  if (c.discord_meta?.rug_score != null && c.discord_meta.rug_score >= 70) {
+    score -= 200;
+  }
+
   // Indicator confirmation (technical OK)
   if (c.indicator_confirmation === true) score += 12;
   else if (c.indicator_confirmation === false) score -= 3;
@@ -139,13 +144,15 @@ async function enrichCandidate(c) {
   // Smart wallet enrichment
   let walletSummary = "none";
   let walletBonus = 0;
-  if (wallets) {
-    const smartCount = wallets.smart_wallets?.length ?? 0;
-    const kolCount = wallets.kol_wallets?.length ?? 0;
+  let swData = null;
+  if (walletResult.status === "fulfilled" && walletResult.value) {
+    swData = walletResult.value;
+    const smartCount = swData.smart_wallets?.length ?? 0;
+    const kolCount = swData.kol_wallets?.length ?? 0;
     const total = smartCount + kolCount;
     if (total > 0) {
       walletSummary = `${smartCount} smart, ${kolCount} KOL`;
-      walletBonus = Math.min(total * 5, 15); // cap at 3 wallets
+      walletBonus = Math.min(total * 5, 15);
     }
   }
 
@@ -156,7 +163,7 @@ async function enrichCandidate(c) {
     _memRecall: recallForPool(addr) || null,
     _walletSummary: walletSummary,
     _walletBonus: walletBonus,
-    _sw: wallets,
+    _sw: swData,
   };
 }
 

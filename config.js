@@ -55,11 +55,13 @@ function numericConfig(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-const legacyBinsBelow = numericConfig(u.binsBelow);
-const configuredMinBinsBelow = numericConfig(u.minBinsBelow) ?? MIN_SAFE_BINS_BELOW;
-const configuredMaxBinsBelow = numericConfig(u.maxBinsBelow)
-  ?? (legacyBinsBelow != null ? Math.max(legacyBinsBelow, configuredMinBinsBelow) : 69);
-const configuredDefaultBinsBelow = numericConfig(u.defaultBinsBelow) ?? legacyBinsBelow ?? configuredMaxBinsBelow;
+// Strategy bins: read from global.strategy (new nested format) first, then root (legacy)
+const _strategySrc = (u.global && u.global.strategy) || u;
+const legacyBinsBelow = numericConfig(_strategySrc.binsBelow);
+const configuredMinBinsBelow = numericConfig(_strategySrc.minBinsBelow) ?? 60;
+const configuredMaxBinsBelow = numericConfig(_strategySrc.maxBinsBelow)
+  ?? (legacyBinsBelow != null ? Math.max(legacyBinsBelow, configuredMinBinsBelow) : 120);
+const configuredDefaultBinsBelow = numericConfig(_strategySrc.defaultBinsBelow) ?? legacyBinsBelow ?? configuredMaxBinsBelow;
 const strategyMinBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.round(configuredMinBinsBelow));
 const strategyMaxBinsBelow = Math.max(strategyMinBinsBelow, Math.round(configuredMaxBinsBelow));
 const strategyDefaultBinsBelow = Math.max(
@@ -132,7 +134,7 @@ export const config = {
   // ─── Position Management ────────────────
   management: {
     minClaimAmount:        management.minClaimAmount        ?? 5,
-    autoSwapAfterClaim:    management.autoSwapAfterClaim    ?? false,
+    autoSwapAfterClaim:    management.autoSwapAfterClaim    ?? true,
     outOfRangeBinsToClose: management.outOfRangeBinsToClose ?? null,
     outOfRangeWaitMinutes: management.outOfRangeWaitMinutes ?? 30,
     oorCooldownTriggerCount: management.oorCooldownTriggerCount ?? 3,
@@ -147,6 +149,7 @@ export const config = {
     takeProfitPct:         management.takeProfitPct         ?? management.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       management.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: management.minAgeBeforeYieldCheck ?? 60,
+    feeTvlDecayPct:        management.feeTvlDecayPct        ?? 50,
     minSolToOpen:          management.minSolToOpen          ?? 0.55,
     deployAmountSol:       management.deployAmountSol       ?? 0.5,
     gasReserve:            management.gasReserve            ?? 0.2,

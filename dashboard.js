@@ -12,13 +12,14 @@ import http from "http";
 import https from "https";
 import fs from "fs";
 import path from "path";
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import { fileURLToPath } from "url";
 import "dotenv/config";
 import { log } from "./logger.js";
 import { config } from "./config.js";
 import { getTrackedPositions, getLastBriefingDate, setLastBriefingDate } from "./state.js";
 import { getRecentDecisions } from "./decision-log.js";
+import { getPerformanceHistory, reconcileClosedPnl } from "./lessons.js";
 import { getMyPositions } from "./tools/dlmm.js";
 import { getWalletBalances, deriveAddress, resetWallet } from "./tools/wallet.js";
 import { resetDlmmWallet } from "./tools/dlmm.js";
@@ -35,14 +36,17 @@ const USER_CONFIG_FILE = path.join(__dirname, "user-config.json");
 const WALLETS_FILE = path.join(__dirname, "wallets.json");
 const AGENT_PID_FILE = path.join(__dirname, ".agent-pid");
 const CHAT_HISTORY_PATH = path.join(__dirname, "chat-history.json");
+const POOL_MEMORY_FILE = path.join(__dirname, "pool-memory.json");
 const CHAT_MAX_MESSAGES = 100;
 const CHAT_MAX_STEPS = 15;
 let _chatBusy = false;
 
-function loadChatHistory() {
+function loadChatHistory(wallet) {
   try {
     if (fs.existsSync(CHAT_HISTORY_PATH)) {
-      return JSON.parse(fs.readFileSync(CHAT_HISTORY_PATH, "utf8"));
+      const data = JSON.parse(fs.readFileSync(CHAT_HISTORY_PATH, "utf8"));
+      if (wallet) data.messages = data.messages.filter(m => (m.wallet || "") === wallet);
+      return data;
     }
   } catch { }
   return { messages: [] };
@@ -76,16 +80,17 @@ async function handlePostChat(req, res) {
   const body = await parseBody(req);
   const message = String(body.message || "").trim();
   if (!message) return jsonReply(res, 400, { error: "Pesan tidak boleh kosong" });
+  const wallet = String(body.wallet || "").trim();
 
   if (_chatBusy) return jsonReply(res, 429, { error: "Agent sedang memproses pesan lain. Tunggu sebentar." });
 
-  const history = loadChatHistory();
-  history.messages.push({ role: "user", content: message, ts: Date.now() });
+  const history = loadChatHistory(); // no filter — load ALL so sessionHistory is complete
+  history.messages.push({ role: "user", content: message, wallet, ts: Date.now() });
 
   _chatBusy = true;
   const t0 = Date.now();
   try {
-    log(`[CHAT] user: ${message.slice(0, 100)}`, "info");
+    log(`[CHAT] user: ${message.slice(0, 100)}${wallet ? " [" + wallet.slice(0, 6) + "]" : ""}`, "info");
     const sessionHistory = history.messages.slice(-20).map(m => ({
       role: m.role === "agent" ? "assistant" : m.role,
       content: m.content,
@@ -99,7 +104,7 @@ async function handlePostChat(req, res) {
       "GENERAL",
       null,
       4096,
-      { interactive: true, source: "CHAT" }
+      { interactive: true, source: "CHAT", wallet: wallet || undefined }
     );
 
     const finalText = result?.content || result?.finalAnswer || result?.output || "— tidak ada respons —";
@@ -107,7 +112,7 @@ async function handlePostChat(req, res) {
     const reply = finalText + (steps ? "\n" + steps : "");
     const ms = Date.now() - t0;
 
-    history.messages.push({ role: "agent", content: reply, ts: Date.now(), ms, steps: (result?.result?.trace || result?.trace || []).length });
+    history.messages.push({ role: "agent", content: reply, wallet, ts: Date.now(), ms, steps: (result?.result?.trace || result?.trace || []).length });
     saveChatHistory(history);
 
     log(`[CHAT] agent replied in ${ms}ms (${(result?.result?.trace || result?.trace || []).length} steps)`, "info");
@@ -120,7 +125,7 @@ async function handlePostChat(req, res) {
   } catch (e) {
     log(`[CHAT] error: ${e.message}`, "error");
     const errMsg = e.message.includes("<html") ? "LLM API gateway timeout — server sibuk, coba lagi dalam beberapa detik" : e.message;
-    history.messages.push({ role: "agent", content: `⚠ Error: ${errMsg}`, ts: Date.now(), error: true });
+    history.messages.push({ role: "agent", content: `⚠ Error: ${errMsg}`, wallet, ts: Date.now(), error: true });
     saveChatHistory(history);
     jsonReply(res, 500, { error: errMsg });
   } finally {
@@ -131,7 +136,9 @@ async function handlePostChat(req, res) {
 function handleGetChatHistory(req, res) {
   const auth = authCheck(req, res);
   if (!auth) return;
-  const history = loadChatHistory();
+  const url = new URL(req.url, "http://localhost");
+  const wallet = (url.searchParams.get("wallet") || "").trim();
+  const history = loadChatHistory(wallet || undefined);
   const messages = history.messages.map(m => ({
     role: m.role,
     content: m.content,
@@ -254,8 +261,15 @@ const STATE_CACHE_MS = 5_000; // serve cached state for 5s (matches dashboard po
 async function handleState(req, res) {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const walletFilter = url.searchParams.get("wallet") || "";
-  // serve from cache when fresh and no ?force param
-  const forceRefresh = url.searchParams.get("force") === "1";
+  // Auto-bust cache when pool-memory.json was recently updated (deploy/close event)
+  let forceRefresh = url.searchParams.get("force") === "1";
+  if (!forceRefresh && fs.existsSync(POOL_MEMORY_FILE)) {
+    try {
+      const mtime = fs.statSync(POOL_MEMORY_FILE).mtimeMs;
+      if (Date.now() - mtime < 20_000) forceRefresh = true;
+    } catch (_) { /* skip */ }
+  }
+  // serve from cache when fresh and no force trigger
   if (!forceRefresh && _stateCache.payload && (Date.now() - _stateCache.ts) < STATE_CACHE_MS) {
     res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
     res.end(_stateCache.payload);
@@ -266,7 +280,7 @@ async function handleState(req, res) {
     const envAddr = envKey ? (deriveAddress(envKey) || "") : "";
     const posOpts = (walletFilter && walletFilter !== "all") ? { wallet_address: walletFilter } : {};
     const [posResult, balances, tracked] = await Promise.all([
-      getMyPositions(posOpts).catch(() => ({ positions: [], wallet: null })),
+      getMyPositions({ ...posOpts, force: forceRefresh }).catch(() => ({ positions: [], wallet: null })),
       getWalletBalances().catch(() => ({ sol: 0, tokens: [] })),
       getTrackedPositions(true) || {},
     ]);
@@ -279,7 +293,7 @@ async function handleState(req, res) {
       if (nonPrimaryWallets.length > 0) {
         const extraResults = await Promise.all(
           nonPrimaryWallets.map(w =>
-            getMyPositions({ wallet_address: w.address }).catch(() => ({ positions: [], wallet: w.address }))
+            getMyPositions({ wallet_address: w.address, force: forceRefresh }).catch(() => ({ positions: [], wallet: w.address }))
           )
         );
         extraPositions = extraResults.flatMap(r => {
@@ -418,22 +432,28 @@ async function handleState(req, res) {
       }
     }
 
-    // compute realized PnL + win rate from decision log
-    const allDecisions = getRecentDecisions(500);
-    const walletDecisions = walletFilter
-      ? allDecisions.filter(d => (d.walletAddress||"").toLowerCase().startsWith(walletFilter.toLowerCase().slice(0,12)))
-      : allDecisions;
-    let realizedPnlUsd = 0, totalDeploys = 0, wonCloses = 0, totalCloses = 0;
-    for (const d of walletDecisions) {
-      if (d.type === "deploy") totalDeploys++;
-      if (d.type === "close") {
-        totalCloses++;
-        const pnl = d.metrics?.pnl_usd ?? d.metrics?.pnlUsd ?? 0;
-        realizedPnlUsd += Number(pnl) || 0;
-        if ((Number(pnl) || 0) > 0) wonCloses++;
-      }
+    // compute realized PnL + win rate from lessons.json (permanent position history)
+    const perfHistory = getPerformanceHistory({ hours: 999999, limit: 10000 });
+    const perfPositions = perfHistory.positions || [];
+    let realizedPnlUsd = 0, totalCloses = 0, wonCloses = 0;
+    for (const r of perfPositions) {
+      totalCloses++;
+      const pnl = r.pnl_usd ?? 0;
+      realizedPnlUsd += Number(pnl) || 0;
+      if ((Number(pnl) || 0) > 0) wonCloses++;
     }
     const winRate = totalCloses > 0 ? Math.round((wonCloses / totalCloses) * 100) : 0;
+
+    // deploy count from pool-memory.json
+    let totalDeploys = 0;
+    try {
+      const poolDb = JSON.parse(fs.readFileSync(POOL_MEMORY_FILE, "utf8"));
+      if (poolDb && typeof poolDb === "object") {
+        for (const pool of Object.values(poolDb)) {
+          totalDeploys += pool.total_deploys || 0;
+        }
+      }
+    } catch (_) { /* pool-memory unavailable */ }
     const totalPnlUsd = openPnlUsd + realizedPnlUsd;
 
     const payload = JSON.stringify({
@@ -450,7 +470,7 @@ async function handleState(req, res) {
       winRate,
       totalDeploys,
       wallet: walletFilter || "all",
-      wallets: [...new Set([...loadWallets().map(w=>w.address), envAddr, ...allDecisions.map(d=>d.walletAddress).filter(Boolean)].filter(Boolean))],
+      wallets: [...new Set([...loadWallets().map(w=>w.address), envAddr, ...getRecentDecisions(500).map(d=>d.walletAddress).filter(Boolean)].filter(Boolean))],
       maxPositions: config.risk?.maxPositions ?? 3,
       stopLossPct: config.management?.stopLossPct ?? -50,
       takeProfitPct: config.management?.takeProfitPct ?? 5,
@@ -606,50 +626,86 @@ function handleStats(req, res) {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const period = url.searchParams.get("period") || "1d";
   const wallet = url.searchParams.get("wallet") || "";
-  const hours = STAT_PERIODS[period] || 24;
-  const cutoff = Date.now() - hours * 60 * 60 * 1000;
+  const fromParam = url.searchParams.get("from") || null;
+  const toParam = url.searchParams.get("to") || null;
+
+  let cutoffDate, endDate;
+  if (fromParam) {
+    cutoffDate = new Date(fromParam);
+    if (isNaN(cutoffDate.getTime())) cutoffDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    if (toParam) {
+      endDate = new Date(toParam);
+      if (isNaN(endDate.getTime())) endDate = new Date();
+      else endDate.setHours(23, 59, 59, 999); // end of day
+    } else {
+      endDate = new Date();
+    }
+    if (endDate < cutoffDate) { const tmp = cutoffDate; cutoffDate = endDate; endDate = tmp; }
+  } else {
+    const h = STAT_PERIODS[period] || 24;
+    cutoffDate = new Date(Date.now() - h * 60 * 60 * 1000);
+    endDate = new Date();
+  }
+  const hours = Math.max(1, Math.ceil((endDate - cutoffDate) / (60 * 60 * 1000)));
 
   try {
     const envKey = process.env.WALLET_PRIVATE_KEY || "";
     const envAddr = envKey ? (deriveAddress(envKey) || "") : "";
-    const all = getRecentDecisions(500);
-    let filtered = all.filter((d) => new Date(d.ts || d.timestamp).getTime() >= cutoff);
-    if (wallet) {
-      const envAddrDerived = envAddr.toLowerCase().slice(0, 12);
-      filtered = filtered.filter((d) => {
-        const dw = (d.walletAddress || "").toLowerCase();
-        // match exact or fallback: no walletAddress = belongs to env wallet
-        return dw.startsWith(wallet.toLowerCase().slice(0, 12)) || (!dw && envAddrDerived === wallet.toLowerCase().slice(0, 12));
-      });
-    }
 
-    let deploys = 0, closes = 0, skip = 0;
-    let totalPnlUsd = 0, totalFeesUsd = 0, won = 0, lost = 0;
-
-    for (const d of filtered) {
-      if (d.type === "deploy" || d.action === "deploy") deploys++;
-      else if (d.type === "close" || d.action === "close") {
-        closes++;
-        const pnl = d.metrics?.pnl_usd ?? d.metrics?.pnlUsd ?? 0;
-        const fees = d.metrics?.feesUsd ?? d.metrics?.fees_usd ?? d.feesUsd ?? 0;
-        totalPnlUsd += Number(pnl) || 0;
-        totalFeesUsd += Number(fees) || 0;
-        if ((Number(pnl) || 0) > 0) won++;
-        else lost++;
+    // Closed positions from lessons.json (permanent history)
+    const perfHistory = getPerformanceHistory({ hours, limit: 10000 });
+    const perfPositions = perfHistory.positions || [];
+    let closes = 0, totalPnlUsd = 0, totalFeesUsd = 0, won = 0, lost = 0;
+    for (const r of perfPositions) {
+      if (fromParam) {
+        const closeDate = new Date(r.closed_at || r.close_date || r.timestamp || 0);
+        if (closeDate < cutoffDate || closeDate > endDate) continue;
       }
-      else if (d.type === "skip" || d.action === "skip" || d.type === "no_deploy") skip++;
+      closes++;
+      const pnl = r.pnl_usd ?? 0;
+      const fees = r.fees_earned_usd ?? 0;
+      totalPnlUsd += Number(pnl) || 0;
+      totalFeesUsd += Number(fees) || 0;
+      if ((Number(pnl) || 0) > 0) won++;
+      else lost++;
     }
 
-    const winRate = closes > 0 ? Math.round((won / closes) * 100) : 0;
+    // Deploy count from pool-memory.json filtered by period
+    let deploys = 0;
+    try {
+      const poolDb = JSON.parse(fs.readFileSync(POOL_MEMORY_FILE, "utf8"));
+      if (poolDb && typeof poolDb === "object") {
+        for (const pool of Object.values(poolDb)) {
+          if (pool.deploys && Array.isArray(pool.deploys)) {
+            for (const d of pool.deploys) {
+              const deployDate = new Date(d.deployed_at || d.timestamp);
+              if (deployDate < cutoffDate) continue;
+              if (deployDate > endDate) continue;
+              deploys++;
+            }
+          }
+        }
+      }
+    } catch (_) { /* pool-memory unavailable */ }
+
+    // Wallet list from decision-log + known wallets
+    const allDecisions = getRecentDecisions(500);
 
     jsonReply(res, 200, {
       ok: true,
       period,
       wallet: wallet || "all",
       hours,
-      cutoff: new Date(cutoff).toISOString(),
-      stats: { total: filtered.length, deploys, closes, skip, won, lost, winRate, totalPnlUsd: Math.round(totalPnlUsd * 100) / 100, totalFeesUsd: Math.round(totalFeesUsd * 100) / 100 },
-      wallets: [...new Set([...loadWallets().map(w=>w.address), envAddr, ...all.map((d) => d.walletAddress).filter(Boolean)].filter(Boolean))],
+      cutoff: cutoffDate.toISOString(),
+      end: endDate.toISOString(),
+      stats: {
+        deploys, closes, won, lost,
+        winRate: closes > 0 ? Math.round((won / closes) * 100) : 0,
+        totalPnlUsd: Math.round(totalPnlUsd * 100) / 100,
+        totalFeesUsd: Math.round(totalFeesUsd * 100) / 100,
+        totalProfits: Math.round((totalPnlUsd + totalFeesUsd) * 100) / 100,
+      },
+      wallets: [...new Set([...loadWallets().map(w=>w.address), envAddr, ...allDecisions.map((d) => d.walletAddress).filter(Boolean)].filter(Boolean))],
       periods: Object.keys(STAT_PERIODS),
     });
   } catch (err) {
@@ -793,6 +849,36 @@ async function handleHistory(req, res) {
         wallet: pos.wallet || envAddr || "",
       });
     }
+
+    // Estimate PnL from pool-memory snapshots for externally_closed positions
+    try {
+      if (fs.existsSync(POOL_MEMORY_FILE)) {
+        const poolMem = JSON.parse(fs.readFileSync(POOL_MEMORY_FILE, "utf8"));
+        for (const row of rows) {
+          if (row.status !== "externally_closed") continue;
+          for (const pool of Object.values(poolMem)) {
+            if (!pool?.snapshots?.length) continue;
+            const match = pool.snapshots
+              .filter(s => s.position && s.position.toLowerCase() === row.pool_address.toLowerCase())
+              .sort((a, b) => new Date(b.ts || 0) - new Date(a.ts || 0));
+            if (!match.length) continue;
+            const last = match[0];
+            const estPnl = Number(last.pnl_pct) || 0;
+            const estUsd = Number(last.pnl_usd) || 0;
+            const estFees = Number(last.unclaimed_fees_usd) || 0;
+          if (estPnl || estUsd) {
+            row.pnl_pct = Math.round(estPnl * 100) / 100;
+            row.pnl_usd = Math.round(estUsd * 100) / 100;
+            row.fees_usd = Math.round(estFees * 100) / 100;
+            row.reason = `(estimated from pool memory) ${row.reason || ""}`.trim();
+            totalPnl += Number(estUsd) || 0;
+            totalFees += Number(estFees) || 0;
+          }
+            break;
+          }
+        }
+      }
+    } catch (_) { /* pool-memory unavailable, skip estimation */ }
 
     rows.sort((a, b) => new Date(b.deployed_at || 0) - new Date(a.deployed_at || 0));
 
@@ -1113,7 +1199,7 @@ function handleGetWallets(req, res) {
     } : null,
     running: w.id !== "_env"
       ? (w.running && isProcessAlive(w.running.pid) ? { pid: w.running.pid, startedAt: w.running.startedAt } : null)
-      : (_primaryAgent && isProcessAlive(_primaryAgent.pid) ? { pid: _primaryAgent.pid, startedAt: _primaryAgent.startedAt } : null),
+      : (getAgentRunningInfo() || null),
     config: w.config || {},
   }));
   jsonReply(res, 200, { ok: true, wallets: safe });
@@ -1302,6 +1388,34 @@ function isProcessAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+const PM2_AGENT_NAME = "pureXBT";
+
+function getPM2AgentInfo() {
+  try {
+    const raw = execSync("pm2 jlist", { encoding: "utf8", timeout: 5000 });
+    const procs = JSON.parse(raw);
+    const agent = procs.find((p) => p.name === PM2_AGENT_NAME);
+    if (agent && agent.pm2_env?.status === "online") {
+      return {
+        pid: agent.pid,
+        startedAt: agent.pm2_env?.pm_uptime
+          ? new Date(agent.pm2_env.pm_uptime).toISOString()
+          : null,
+      };
+    }
+  } catch {}
+  return null;
+}
+
+function getAgentRunningInfo() {
+  const pm2 = getPM2AgentInfo();
+  if (pm2) return pm2;
+  if (_primaryAgent && isProcessAlive(_primaryAgent.pid)) {
+    return { pid: _primaryAgent.pid, startedAt: _primaryAgent.startedAt };
+  }
+  return null;
+}
+
 // ─── Agent Start/Stop ───────────────────────────────────────────
 
 function restoreAgentPid() {
@@ -1319,57 +1433,68 @@ function restoreAgentPid() {
 }
 
 function getAgentStatus(req, res) {
-  const running = !!(_primaryAgent && isProcessAlive(_primaryAgent.pid));
-  if (!running) _primaryAgent = null;
+  const info = getAgentRunningInfo();
   jsonReply(res, 200, {
     ok: true,
-    running,
-    pid: running ? _primaryAgent.pid : null,
-    startedAt: running ? _primaryAgent.startedAt : null,
+    running: !!info,
+    pid: info ? info.pid : null,
+    startedAt: info ? info.startedAt : null,
   });
 }
 
 async function handleStartAgent(req, res) {
   if (!authCheck(req, res)) return;
-  if (_primaryAgent && fs.existsSync(AGENT_PID_FILE)) {
-    return jsonReply(res, 200, { ok: true, running: true, pid: _primaryAgent.pid, message: "Already running" });
+  const info = getAgentRunningInfo();
+  if (info) {
+    return jsonReply(res, 200, { ok: true, running: true, pid: info.pid, message: "Already running" });
   }
+  // Clean up stale PID file
+  _primaryAgent = null;
+  try { fs.unlinkSync(AGENT_PID_FILE); } catch {}
   try {
-    const childEnv = { ...process.env };
-    delete childEnv.pm_exec_path; // remove PM2 entrypoint so child detects isMain correctly
-    const child = spawn("node", ["index.js"], {
-      cwd: __dirname,
-      env: childEnv,
-      stdio: "ignore",
-      detached: true,
-      windowsHide: true,
+    execSync(`pm2 start ${PM2_AGENT_NAME} --update-env`, { timeout: 15000 });
+    log("dashboard", `Agent started via PM2 (${PM2_AGENT_NAME})`);
+    await new Promise((r) => setTimeout(r, 1500));
+    const newInfo = getPM2AgentInfo();
+    jsonReply(res, 200, {
+      ok: true,
+      running: true,
+      pid: newInfo?.pid || null,
+      startedAt: newInfo?.startedAt || null,
+      message: "Agent started via PM2",
     });
-    child.unref();
-    fs.writeFileSync(AGENT_PID_FILE, String(child.pid));
-    _primaryAgent = { pid: child.pid, startedAt: new Date().toISOString() };
-    log("dashboard", `Agent started (pid ${child.pid})`);
-    jsonReply(res, 200, { ok: true, running: true, pid: child.pid, startedAt: _primaryAgent.startedAt });
   } catch (err) {
-    jsonReply(res, 500, { ok: false, error: err.message });
+    jsonReply(res, 500, { ok: false, error: `PM2 start failed: ${err.message}` });
   }
 }
 
 async function handleStopAgent(req, res) {
   if (!authCheck(req, res)) return;
-  if (!_primaryAgent || !isProcessAlive(_primaryAgent.pid)) {
+  const info = getAgentRunningInfo();
+  if (!info) {
     _primaryAgent = null;
     try { fs.unlinkSync(AGENT_PID_FILE); } catch {}
-    jsonReply(res, 200, { ok: true, running: false, message: "Not running" });
-    return;
+    return jsonReply(res, 200, { ok: true, running: false, message: "Not running" });
   }
   try {
-    process.kill(_primaryAgent.pid, "SIGKILL");
+    execSync(`pm2 stop ${PM2_AGENT_NAME}`, { timeout: 10000 });
     _primaryAgent = null;
     try { fs.unlinkSync(AGENT_PID_FILE); } catch {}
-    log("dashboard", "Agent stopped");
-    jsonReply(res, 200, { ok: true, running: false, message: "Stopped" });
+    log("dashboard", `Agent stopped via PM2 (${PM2_AGENT_NAME})`);
+    jsonReply(res, 200, { ok: true, running: false, message: "Agent stopped via PM2" });
   } catch (err) {
-    jsonReply(res, 500, { ok: false, error: err.message });
+    // Fallback: kill directly if PM2 fails
+    try {
+      if (_primaryAgent && isProcessAlive(_primaryAgent.pid)) {
+        process.kill(_primaryAgent.pid, "SIGKILL");
+      }
+      _primaryAgent = null;
+      try { fs.unlinkSync(AGENT_PID_FILE); } catch {}
+      log("dashboard", "Agent stopped (direct kill)");
+      jsonReply(res, 200, { ok: true, running: false, message: "Stopped" });
+    } catch (err2) {
+      jsonReply(res, 500, { ok: false, error: err2.message });
+    }
   }
 }
 
@@ -1502,7 +1627,7 @@ async function handlePostWalletConfig(req, res) {
   }
 
   // If this wallet is currently running, apply to runtime config immediately
-  const isRunning = (wallet.id === "_env" && _primaryAgent && isProcessAlive(_primaryAgent.pid))
+  const isRunning = (wallet.id === "_env" && !!getAgentRunningInfo())
     || (wallet.running && isProcessAlive(wallet.running.pid));
   if (isRunning) {
     try {
@@ -1519,6 +1644,71 @@ async function handlePostWalletConfig(req, res) {
   }
 
   jsonReply(res, 200, { ok: true, config: body.config });
+}
+
+// ─── Learning API ────────────────────────────────────────────────
+
+async function handleLearning(req, res) {
+  try {
+    const result = { lessons: [], performance: [], weights: null, evolution: [], stats: {} };
+    const lessonsPath = path.join(__dirname, "lessons.json");
+    const weightsPath = path.join(__dirname, "signal-weights.json");
+    if (fs.existsSync(lessonsPath)) {
+      const raw = JSON.parse(fs.readFileSync(lessonsPath, "utf8"));
+      result.lessons = raw.lessons || [];
+      result.performance = raw.performance || [];
+      result.evolution = result.lessons.filter(l =>
+        (l.tags || []).some(t => t === "evolution" || t === "self_tune" || t === "config_change")
+      );
+      const perf = raw.performance || [];
+      const wins = perf.filter(p => (p.pnl_pct || 0) > 0);
+      const losses = perf.filter(p => (p.pnl_pct || 0) < 0);
+      result.stats = {
+        total_positions: perf.length,
+        winners: wins.length,
+        losers: losses.length,
+        win_rate: perf.length ? ((wins.length / perf.length) * 100).toFixed(1) : "0",
+        best_pnl: wins.length ? Math.max(...wins.map(p => p.pnl_pct || 0)).toFixed(2) : "0",
+        worst_pnl: losses.length ? Math.min(...losses.map(p => p.pnl_pct || 0)).toFixed(2) : "0",
+        avg_winner_pnl: wins.length ? (wins.reduce((s,p) => s + (p.pnl_pct||0), 0) / wins.length).toFixed(2) : "0",
+        avg_loser_pnl: losses.length ? (losses.reduce((s,p) => s + (p.pnl_pct||0), 0) / losses.length).toFixed(2) : "0",
+      };
+    }
+    if (fs.existsSync(weightsPath)) {
+      result.weights = JSON.parse(fs.readFileSync(weightsPath, "utf8"));
+    }
+    jsonReply(res, 200, { ok: true, data: result });
+  } catch (err) {
+    jsonReply(res, 500, { ok: false, error: err.message });
+  }
+}
+
+async function handleLearningKnowledge(req, res) {
+  try {
+    const knowledgePath = path.join(__dirname, "..", "agentlearning.md");
+    if (!fs.existsSync(knowledgePath)) {
+      return jsonReply(res, 404, { ok: false, error: "agentlearning.md not found" });
+    }
+    const text = fs.readFileSync(knowledgePath, "utf8");
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end(text);
+  } catch (err) {
+    jsonReply(res, 500, { ok: false, error: err.message });
+  }
+}
+
+// ─── PnL Reconciliation ────────────────────────────────────────
+
+async function handleReconcile(req, res) {
+  if (!authCheck(req, res)) return;
+  try {
+    const envKey = process.env.WALLET_PRIVATE_KEY || "";
+    const walletAddr = envKey ? (deriveAddress(envKey) || "") : "";
+    const result = await reconcileClosedPnl(walletAddr);
+    jsonReply(res, 200, { ok: true, ...result });
+  } catch (err) {
+    jsonReply(res, 500, { ok: false, error: err.message });
+  }
 }
 
 // ─── Static UI ──────────────────────────────────────────────────
@@ -1539,6 +1729,7 @@ const API_ROUTES = new Set([
   "/api/wallets", "/api/agent", "/api/agent/start", "/api/agent/stop",
   "/api/decisions", "/api/stats", "/api/history", "/api/logs",
   "/api/action", "/api/chat", "/api/chat/history", "/api/health",
+    "/api/learning", "/api/learning/knowledge", "/api/reconcile",
 ]);
 
 function createServer() {
@@ -1560,9 +1751,19 @@ function createServer() {
     }
 
   const BANNER_FILE = path.join(__dirname, "banner.png");
+  const LOGO_FILE = path.join(__dirname, "logo.svg");
 
     // Static files
     if (req.method === "GET" && (p === "/" || p === "/index.html")) return serveUI(req, res);
+    if (req.method === "GET" && p === "/learning" || p === "/learning.html") {
+      const learningFile = path.join(__dirname, "learning.html");
+      if (!fs.existsSync(learningFile)) {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        return res.end("learning.html not found on server");
+      }
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
+      return res.end(fs.readFileSync(learningFile, "utf8"));
+    }
     if (req.method === "GET" && p === "/banner.png") {
       if (!fs.existsSync(BANNER_FILE)) {
         res.writeHead(404, { "Content-Type": "text/plain" });
@@ -1570,6 +1771,14 @@ function createServer() {
       }
       res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "public, max-age=86400" });
       return res.end(fs.readFileSync(BANNER_FILE));
+    }
+    if (req.method === "GET" && p === "/logo.svg") {
+      if (!fs.existsSync(LOGO_FILE)) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        return res.end("logo.svg not found");
+      }
+      res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" });
+      return res.end(fs.readFileSync(LOGO_FILE));
     }
 
     // API routes
@@ -1602,6 +1811,13 @@ function createServer() {
 
     // Health check (no auth)
     if (p === "/api/health")    return jsonReply(res, 200, { ok: true, ts: new Date().toISOString() });
+
+    // Learning API
+    if (p === "/api/learning" && req.method === "GET") return handleLearning(req, res);
+    if (p === "/api/learning/knowledge" && req.method === "GET") return handleLearningKnowledge(req, res);
+
+    // PnL Reconciliation
+    if (p === "/api/reconcile" && req.method === "POST") return handleReconcile(req, res);
 
     // 404
     jsonReply(res, 404, { ok: false, error: "Not found" });

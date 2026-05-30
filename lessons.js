@@ -11,6 +11,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { log } from "./logger.js";
 import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } from "./hivemind.js";
+import { blockDev } from "./dev-blocklist.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
@@ -29,8 +30,16 @@ const PERFORMANCE_SIGNAL_FIELDS = [
   "study_win_rate",
   "hive_consensus",
   "volatility",
+  "discord_author",
+  "discord_channel",
+  "discord_signal_count",
 ];
+const DISCORD_SIGNALS_FILE = path.resolve("discord-signals.json");
 const MAX_MANUAL_LESSON_LENGTH = 400;
+const LESSON_DECAY_HALF_LIFE_HOURS = 168;   // lessons lose 50% influence after 7 days
+const LESSON_PRUNE_AFTER_HOURS = 720;        // prune unpinned lessons after 30 days
+const LESSON_CONFIDENCE_FLOOR = 0.15;        // below this, lesson is hidden from prompt
+const LESSON_DEDUP_SIMILARITY = 0.75;        // similarity threshold for dedup merge
 
 function sanitizeLessonText(text, maxLen = MAX_MANUAL_LESSON_LENGTH) {
   if (text == null) return null;
@@ -93,6 +102,38 @@ function buildSignalSnapshot(perf) {
  * @param {number} perf.minutes_held      - Total minutes position was held
  * @param {string} perf.close_reason   - Why it was closed
  */
+/**
+ * Look up Discord signal metadata by base_mint from the local signals file.
+ * Returns {discord_author, discord_channel, discord_signal_count} or null.
+ */
+function lookupDiscordSignal(baseMint) {
+  if (!baseMint || !fs.existsSync(DISCORD_SIGNALS_FILE)) return null;
+  try {
+    const signals = JSON.parse(fs.readFileSync(DISCORD_SIGNALS_FILE, "utf8"));
+    if (!Array.isArray(signals)) return null;
+    const matches = signals.filter((s) => s.base_mint === baseMint);
+    if (matches.length === 0) return null;
+    const latest = matches[matches.length - 1];
+    return {
+      discord_author: latest.discord_author || null,
+      discord_channel: latest.discord_channel || null,
+      discord_signal_count: matches.length,
+    };
+  } catch { return null; }
+}
+
+/**
+ * Fetch on-chain deployer (dev) wallet for a token from Jupiter API.
+ */
+async function fetchDeployer(baseMint) {
+  try {
+    const res = await fetch(`https://api.jup.ag/tokens/v1/${baseMint}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.mintAuthority || data?.deployer || null;
+  } catch { return null; }
+}
+
 export async function recordPerformance(perf) {
   const data = load();
 
@@ -142,19 +183,53 @@ export async function recordPerformance(perf) {
     recorded_at: new Date().toISOString(),
   };
 
+  // Enrich with Discord signal metadata if not already present
+  if (!entry.discord_author && entry.base_mint) {
+    const discordMeta = lookupDiscordSignal(entry.base_mint);
+    if (discordMeta) {
+      entry.discord_author = discordMeta.discord_author;
+      entry.discord_channel = discordMeta.discord_channel;
+      entry.discord_signal_count = discordMeta.discord_signal_count;
+      if (entry.signal_snapshot) {
+        entry.signal_snapshot.discord_author = discordMeta.discord_author;
+        entry.signal_snapshot.discord_channel = discordMeta.discord_channel;
+        entry.signal_snapshot.discord_signal_count = discordMeta.discord_signal_count;
+      }
+    }
+  }
+
+  // Auto-block deployer on severe loss
+  if (entry.pnl_pct < -15 && perf.base_mint) {
+    try {
+      const dev = await fetchDeployer(perf.base_mint);
+      if (dev) {
+        blockDev({
+          wallet: dev,
+          reason: `Bad position: ${entry.pnl_pct}% PnL on ${perf.pool_name || perf.pool}`,
+          label: perf.pool_name || perf.base_mint?.slice(0, 8),
+        });
+        entry.blocked_dev = dev;
+        log("lessons", `Auto-blocked deployer ${dev.slice(0, 8)}... for ${perf.pool_name}: ${entry.pnl_pct}% loss`);
+      }
+    } catch (e) {
+      log("lessons_warn", `Failed to fetch deployer for auto-block: ${e.message}`);
+    }
+  }
+
   data.performance.push(entry);
 
   // Derive and store a lesson
   const lesson = derivLesson(entry);
   if (lesson) {
-    data.lessons.push(lesson);
+    upsertLesson(data, lesson);
     log("lessons", `New lesson: ${lesson.rule}`);
   }
 
   save(data);
-  if (lesson) {
-    void pushHiveLesson(lesson);
-  }
+  // Push disabled — pull-only mode
+  // if (lesson) {
+  //   void pushHiveLesson(lesson);
+  // }
 
   // Update pool-level memory
   if (perf.pool) {
@@ -196,12 +271,13 @@ export async function recordPerformance(perf) {
     }
   }
 
-  void pushHivePerformanceEvent({
-    ...entry,
-    base_mint: perf.base_mint || null,
-    fees_earned_sol: perf.fees_earned_sol || 0,
-    eventId: `close:${perf.position}:${entry.recorded_at}`,
-  });
+  // Push disabled — pull-only mode
+  // void pushHivePerformanceEvent({
+  //   ...entry,
+  //   base_mint: perf.base_mint || null,
+  //   fees_earned_sol: perf.fees_earned_sol || 0,
+  //   eventId: `close:${perf.position}:${entry.recorded_at}`,
+  // });
 
 }
 
@@ -385,6 +461,178 @@ export function evolveThresholds(perfData, config) {
     }
   }
 
+  // ── 3. minVolume ──────────────────────────────────────────────
+  // Adjust volume floor based on winner/loser volume patterns.
+  {
+    const current = config.screening.minVolume;
+    if (typeof current === "number" && isFinite(current)) {
+      const winnerVols = winners.map((p) => p.volume ?? p.signal_snapshot?.volume).filter(isFiniteNum);
+      const loserVols  = losers.map((p) => p.volume ?? p.signal_snapshot?.volume).filter(isFiniteNum);
+      if (winnerVols.length >= 2 && loserVols.length >= 2) {
+        const minWinnerVol = Math.min(...winnerVols);
+        const avgLoserVol  = avg(loserVols);
+        if (minWinnerVol > current * 1.3 && avgLoserVol < minWinnerVol * 0.7) {
+          const target = minWinnerVol * 0.8;
+          const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 100, 5000);
+          if (newVal > current) {
+            changes.minVolume = newVal;
+            rationale.minVolume = `Winners had volume>=${minWinnerVol.toFixed(0)}, losers avg ${avgLoserVol.toFixed(0)} — raised floor from ${current} → ${newVal}`;
+          }
+        }
+      }
+    }
+  }
+
+  // ── 4. minHolders ─────────────────────────────────────────────
+  // Raise holder floor if low-holder tokens consistently failed.
+  {
+    const current = config.screening.minHolders;
+    if (typeof current === "number" && isFinite(current)) {
+      const winnerHolders = winners.map((p) => p.holder_count ?? p.signal_snapshot?.holder_count).filter(isFiniteNum);
+      const loserHolders  = losers.map((p) => p.holder_count ?? p.signal_snapshot?.holder_count).filter(isFiniteNum);
+      if (winnerHolders.length >= 2 && loserHolders.length >= 2) {
+        const minWinnerHolders = Math.min(...winnerHolders);
+        const avgLoserHolders  = avg(loserHolders);
+        if (minWinnerHolders > current * 1.2 && avgLoserHolders < minWinnerHolders * 0.8) {
+          const target = minWinnerHolders * 0.85;
+          const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 100, 5000);
+          if (newVal > current) {
+            changes.minHolders = newVal;
+            rationale.minHolders = `Winners had holders>=${minWinnerHolders.toFixed(0)}, losers avg ${avgLoserHolders.toFixed(0)} — raised floor from ${current} → ${newVal}`;
+          }
+        }
+      }
+    }
+  }
+
+  // ── 5. minMcap ────────────────────────────────────────────────
+  // Adjust mcap floor based on winner/loser patterns.
+  {
+    const current = config.screening.minMcap;
+    if (typeof current === "number" && isFinite(current)) {
+      const winnerMcaps = winners.map((p) => p.mcap ?? p.signal_snapshot?.mcap).filter(isFiniteNum);
+      const loserMcaps  = losers.map((p) => p.mcap ?? p.signal_snapshot?.mcap).filter(isFiniteNum);
+      if (winnerMcaps.length >= 2 && loserMcaps.length >= 2) {
+        const minWinnerMcap = Math.min(...winnerMcaps);
+        const avgLoserMcap  = avg(loserMcaps);
+        if (minWinnerMcap > current * 1.3 && avgLoserMcap < minWinnerMcap * 0.6) {
+          const target = minWinnerMcap * 0.8;
+          const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 50000, 5000000);
+          if (newVal > current) {
+            changes.minMcap = newVal;
+            rationale.minMcap = `Winners had mcap>=${formatNum(minWinnerMcap)}, losers avg ${formatNum(avgLoserMcap)} — raised floor from ${formatNum(current)} → ${formatNum(newVal)}`;
+          }
+        }
+      }
+    }
+  }
+
+  // ── 6. maxBundlersPct ─────────────────────────────────────────
+  // Lower bundler ceiling if high-bundler tokens consistently failed.
+  {
+    const current = config.screening.maxBundlersPct;
+    if (typeof current === "number" && isFinite(current)) {
+      const winnerBundlers = winners.map((p) => p.bundler_pct ?? p.signal_snapshot?.bundler_pct).filter(isFiniteNum);
+      const loserBundlers  = losers.map((p) => p.bundler_pct ?? p.signal_snapshot?.bundler_pct).filter(isFiniteNum);
+      if (loserBundlers.length >= 2 && winnerBundlers.length >= 2) {
+        const maxWinnerBundler = Math.max(...winnerBundlers);
+        const avgLoserBundler  = avg(loserBundlers);
+        if (avgLoserBundler > maxWinnerBundler * 1.3 && avgLoserBundler > current * 0.8) {
+          const target = maxWinnerBundler * 1.1;
+          const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 10, 50);
+          if (newVal < current) {
+            changes.maxBundlersPct = newVal;
+            rationale.maxBundlersPct = `Losers avg bundler ${avgLoserBundler.toFixed(0)}% > winners max ${maxWinnerBundler.toFixed(0)}% — lowered ceiling from ${current} → ${newVal}`;
+          }
+        }
+      }
+    }
+  }
+
+  // ── 7. minTokenFeesSol ───────────────────────────────────────
+  {
+    const current = config.screening.minTokenFeesSol;
+    if (typeof current === "number" && isFinite(current)) {
+      const winnerFees = winners.map((p) => p.total_fees_sol ?? p.signal_snapshot?.total_fees_sol).filter(isFiniteNum);
+      const loserFees  = losers.map((p) => p.total_fees_sol ?? p.signal_snapshot?.total_fees_sol).filter(isFiniteNum);
+      if (winnerFees.length >= 2 && loserFees.length >= 2) {
+        const minWinnerFee = Math.min(...winnerFees);
+        const avgLoserFee  = avg(loserFees);
+        if (minWinnerFee > current * 1.3 && avgLoserFee < minWinnerFee * 0.6) {
+          const target = minWinnerFee * 0.8;
+          const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 5, 200);
+          if (newVal > current) {
+            changes.minTokenFeesSol = newVal;
+            rationale.minTokenFeesSol = `Winners had fees>=${minWinnerFee.toFixed(1)} SOL, losers avg ${avgLoserFee.toFixed(1)} — raised floor from ${current} → ${newVal}`;
+          }
+        }
+      }
+    }
+  }
+
+  // ── 8. minBinStep ─────────────────────────────────────────────
+  {
+    const current = config.screening.minBinStep;
+    if (typeof current === "number" && isFinite(current)) {
+      const winnerBins = winners.map((p) => p.bin_step ?? p.signal_snapshot?.bin_step).filter(isFiniteNum);
+      const loserBins  = losers.map((p) => p.bin_step ?? p.signal_snapshot?.bin_step).filter(isFiniteNum);
+      if (winnerBins.length >= 2 && loserBins.length >= 2) {
+        const minWinnerBin = Math.min(...winnerBins);
+        const maxLoserBin  = Math.max(...loserBins);
+        if (minWinnerBin > current && maxLoserBin < minWinnerBin) {
+          const target = minWinnerBin * 0.9;
+          const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 1, 500);
+          if (newVal > current) {
+            changes.minBinStep = newVal;
+            rationale.minBinStep = `Winners bin_step>=${minWinnerBin}, losers max ${maxLoserBin} — raised floor from ${current} → ${newVal}`;
+          }
+        }
+      }
+    }
+  }
+
+  // ── 9. maxBinStep ─────────────────────────────────────────────
+  {
+    const current = config.screening.maxBinStep;
+    if (typeof current === "number" && isFinite(current)) {
+      const winnerBins = winners.map((p) => p.bin_step ?? p.signal_snapshot?.bin_step).filter(isFiniteNum);
+      const loserBins  = losers.map((p) => p.bin_step ?? p.signal_snapshot?.bin_step).filter(isFiniteNum);
+      if (winnerBins.length >= 2 && loserBins.length >= 2) {
+        const maxWinnerBin = Math.max(...winnerBins);
+        const avgLoserBin  = avg(loserBins);
+        if (avgLoserBin > maxWinnerBin * 1.3) {
+          const target = maxWinnerBin * 1.1;
+          const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 1, 500);
+          if (newVal < current) {
+            changes.maxBinStep = newVal;
+            rationale.maxBinStep = `Losers avg bin_step ${avgLoserBin.toFixed(0)} > winners max ${maxWinnerBin} — lowered ceiling from ${current} → ${newVal}`;
+          }
+        }
+      }
+    }
+  }
+
+  // ── 10. maxMcap ───────────────────────────────────────────────
+  {
+    const current = config.screening.maxMcap;
+    if (typeof current === "number" && isFinite(current)) {
+      const winnerMcaps = winners.map((p) => p.mcap ?? p.signal_snapshot?.mcap).filter(isFiniteNum);
+      const loserMcaps  = losers.map((p) => p.mcap ?? p.signal_snapshot?.mcap).filter(isFiniteNum);
+      if (winnerMcaps.length >= 2 && loserMcaps.length >= 2) {
+        const maxWinnerMcap = Math.max(...winnerMcaps);
+        const avgLoserMcap  = avg(loserMcaps);
+        if (avgLoserMcap > maxWinnerMcap * 1.5) {
+          const target = maxWinnerMcap * 1.2;
+          const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 100000, 50000000);
+          if (newVal < current) {
+            changes.maxMcap = newVal;
+            rationale.maxMcap = `Losers avg mcap ${formatNum(avgLoserMcap)} > winners max ${formatNum(maxWinnerMcap)} — lowered ceiling from ${formatNum(current)} → ${formatNum(newVal)}`;
+          }
+        }
+      }
+    }
+  }
+
   if (Object.keys(changes).length === 0) return { changes: {}, rationale: {} };
 
   // ── Persist changes to user-config.json (nested global path) ───
@@ -403,13 +651,13 @@ export function evolveThresholds(perfData, config) {
   fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
 
   // Apply to live config object immediately
-  const s = config.screening;
-  if (changes.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = changes.minFeeActiveTvlRatio;
-  if (changes.minOrganic       != null) s.minOrganic       = changes.minOrganic;
+  for (const [key, value] of Object.entries(changes)) {
+    config.screening[key] = value;
+  }
 
   // Log a lesson summarizing the evolution
   const data = load();
-  data.lessons.push({
+  upsertLesson(data, {
     id: Date.now(),
     rule: `[AUTO-EVOLVED @ ${perfData.length} positions] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")} — ${Object.values(rationale).join("; ")}`,
     tags: ["evolution", "config_change"],
@@ -451,6 +699,121 @@ function nudge(current, target, maxChange) {
   return current + Math.sign(delta) * maxDelta;
 }
 
+// ─── Confidence Decay ──────────────────────────────────────────
+
+/** Extract timestamp from a lesson, tolerant of missing fields. */
+function lessonTimestamp(lesson) {
+  if (lesson.created_at) return new Date(lesson.created_at).getTime();
+  if (lesson.timestamp) return new Date(lesson.timestamp).getTime();
+  if (lesson.id && typeof lesson.id === "number" && lesson.id > 1e12) return lesson.id;
+  return 0;
+}
+
+/** Lesson age in hours from current time. */
+function lessonAgeHours(lesson, nowMs = Date.now()) {
+  const ts = lessonTimestamp(lesson);
+  return ts > 0 ? (nowMs - ts) / (1000 * 60 * 60) : 0;
+}
+
+/** Compute effective confidence with exponential decay. */
+function effectiveConfidence(lesson, nowMs = Date.now()) {
+  const raw = typeof lesson.confidence === "number" ? lesson.confidence : 0.5;
+  const ageHours = lessonAgeHours(lesson, nowMs);
+  if (ageHours <= 0) return raw;
+  const decay = Math.pow(0.5, ageHours / LESSON_DECAY_HALF_LIFE_HOURS);
+  return raw * decay;
+}
+
+/** Whether a lesson should be pruned due to age. */
+function isPrunedByAge(lesson, nowMs = Date.now()) {
+  if (lesson.pinned) return false;
+  const ageHours = lessonAgeHours(lesson, nowMs);
+  return ageHours > LESSON_PRUNE_AFTER_HOURS;
+}
+
+// ─── Lesson Deduplication ──────────────────────────────────────
+
+/** Normalize a lesson rule for comparison. */
+function normalizeLessonText(rule) {
+  if (!rule) return "";
+  return String(rule)
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[,.;:()=\[\]-]/g, " ")
+    .replace(/\b\d+\.?\d*\b/g, "__NUM__")
+    .toLowerCase()
+    .trim();
+}
+
+/** Jaccard-like similarity on normalized text tokens. */
+function lessonTextSimilarity(a, b) {
+  const normA = normalizeLessonText(a);
+  const normB = normalizeLessonText(b);
+  if (!normA || !normB) return 0;
+  const tokensA = new Set(normA.split(" ").filter(Boolean));
+  const tokensB = new Set(normB.split(" ").filter(Boolean));
+  const intersection = [...tokensA].filter((t) => tokensB.has(t)).length;
+  const union = new Set([...tokensA, ...tokensB]).size;
+  return union > 0 ? intersection / union : 0;
+}
+
+/** Check if two lessons share a similar pool type or context. */
+function lessonsShareContext(a, b) {
+  if (a.pool && b.pool && a.pool === b.pool) return true;
+  if (a.pool_name && b.pool_name && a.pool_name === b.pool_name) return true;
+  const contextA = normalizeLessonText(a.rule || a.context || "");
+  const contextB = normalizeLessonText(b.rule || b.context || "");
+  const textSim = lessonTextSimilarity(contextA, contextB);
+  return textSim >= 0.5;
+}
+
+/** Full similarity check for dedup matching. */
+function lessonSimilarityScore(a, b) {
+  const textSim = lessonTextSimilarity(a.rule, b.rule);
+  const contextMatch = lessonsShareContext(a, b) ? 0.15 : 0;
+  const sameOutcome = a.outcome === b.outcome ? 0.1 : 0;
+  return textSim + contextMatch + sameOutcome;
+}
+
+/** Find an existing lesson similar enough to the candidate. */
+function findDuplicateLesson(lessons, candidate) {
+  for (const existing of lessons) {
+    if (existing.id === candidate.id) continue;
+    const score = lessonSimilarityScore(existing, candidate);
+    if (score >= LESSON_DEDUP_SIMILARITY) return existing;
+  }
+  return null;
+}
+
+/** Merge a duplicate lesson into the existing one. */
+function mergeLesson(existing, incoming) {
+  existing.confidence = Math.min(1.0, (existing.confidence + incoming.confidence) / 2 * 1.15);
+  if (incoming.pinned) existing.pinned = true;
+  if (incoming.tags) {
+    existing.tags = existing.tags || [];
+    for (const t of incoming.tags) {
+      if (!existing.tags.includes(t)) existing.tags.push(t);
+    }
+  }
+  existing.merged_count = (existing.merged_count || 1) + 1;
+  existing.updated_at = incoming.created_at || new Date().toISOString();
+  if (incoming.pnl_pct != null) existing.last_pnl_pct = incoming.pnl_pct;
+  if (incoming.range_efficiency != null) existing.last_range_efficiency = incoming.range_efficiency;
+  if (incoming.close_reason) existing.last_close_reason = incoming.close_reason;
+  return existing;
+}
+
+/** Insert lesson with dedup: merge if similar exists, else append. */
+function upsertLesson(data, lesson) {
+  const dup = findDuplicateLesson(data.lessons, lesson);
+  if (dup) {
+    mergeLesson(dup, lesson);
+    return dup;
+  }
+  data.lessons.push(lesson);
+  return lesson;
+}
+
 // ─── Manual Lessons ────────────────────────────────────────────
 
 /**
@@ -476,10 +839,11 @@ export function addLesson(rule, tags = [], { pinned = false, role = null } = {})
     role: role || null,
     created_at: new Date().toISOString(),
   };
-  data.lessons.push(lesson);
+  upsertLesson(data, lesson);
   save(data);
   log("lessons", `Manual lesson added${pinned ? " [PINNED]" : ""}${role ? ` [${role}]` : ""}: ${safeRule}`);
-  void pushHiveLesson(lesson);
+  // Push disabled — pull-only mode
+  // void pushHiveLesson(lesson);
 }
 
 /**
@@ -602,7 +966,15 @@ export function getLessonsForPrompt(opts = {}) {
   const RECENT_CAP  = maxLessons ?? (isAutoCycle ? 10 : 35);
 
   const outcomePriority = { bad: 0, poor: 1, failed: 1, good: 2, worked: 2, manual: 1, neutral: 3, evolution: 2 };
-  const byPriority = (a, b) => (outcomePriority[a.outcome] ?? 3) - (outcomePriority[b.outcome] ?? 3);
+  const now = Date.now();
+  const byPriority = (a, b) => {
+    // Use effective confidence for decay-aware sorting
+    const ea = effectiveConfidence(a, now);
+    const eb = effectiveConfidence(b, now);
+    const outcomeDiff = (outcomePriority[a.outcome] ?? 3) - (outcomePriority[b.outcome] ?? 3);
+    if (outcomeDiff !== 0) return outcomeDiff;
+    return eb - ea; // higher effective confidence first
+  };
 
   // ── Tier 1: Pinned ──────────────────────────────────────────────
   // Respect role even for pinned lessons — a pinned SCREENER lesson shouldn't pollute MANAGER
@@ -633,8 +1005,22 @@ export function getLessonsForPrompt(opts = {}) {
   const remainingBudget = RECENT_CAP - pinned.length - roleMatched.length;
   const recent = remainingBudget > 0
     ? data.lessons
-        .filter((l) => !usedIds.has(l.id))
-        .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))
+        .filter((l) => {
+          if (usedIds.has(l.id)) return false;
+          // Prune old unpinned lessons that have decayed below floor
+          if (!l.pinned && effectiveConfidence(l, now) < LESSON_CONFIDENCE_FLOOR) {
+            return false;
+          }
+          // Prune lessons older than max age (unless pinned)
+          if (!l.pinned && isPrunedByAge(l, now)) return false;
+          return true;
+        })
+        .sort((a, b) => {
+          // Sort by effective confidence first, then recency
+          const confDiff = effectiveConfidence(b, now) - effectiveConfidence(a, now);
+          if (Math.abs(confDiff) > 0.01) return confDiff;
+          return (b.created_at || "").localeCompare(a.created_at || "");
+        })
         .slice(0, remainingBudget)
     : [];
 
@@ -728,4 +1114,123 @@ export function getPerformanceSummary() {
     win_rate_pct: Math.round((wins / p.length) * 100),
     total_lessons: data.lessons.length,
   };
+}
+
+/**
+ * Get per-author Discord signal accuracy stats.
+ * Groups closed positions by discord_author and computes win rate, avg PnL, etc.
+ */
+export function getAuthorStats() {
+  const data = load();
+  const entries = data.performance.filter(
+    (p) => p.discord_author || p.signal_snapshot?.discord_author,
+  );
+
+  if (entries.length === 0) return { authors: [], total_discord_tracked: 0 };
+
+  const authorMap = {};
+  for (const e of entries) {
+    const author = e.discord_author || e.signal_snapshot?.discord_author;
+    if (!author) continue;
+    if (!authorMap[author]) {
+      authorMap[author] = { author, total: 0, wins: 0, losses: 0, total_pnl_usd: 0, total_pnl_pct: 0 };
+    }
+    const a = authorMap[author];
+    a.total++;
+    a.total_pnl_usd += e.pnl_usd || 0;
+    a.total_pnl_pct += e.pnl_pct || 0;
+    if ((e.pnl_usd || 0) > 0) a.wins++;
+    else if ((e.pnl_usd || 0) < 0) a.losses++;
+  }
+
+  const authors = Object.values(authorMap)
+    .map((a) => ({
+      ...a,
+      win_rate_pct: a.total > 0 ? Math.round((a.wins / a.total) * 100) : 0,
+      avg_pnl_usd: a.total > 0 ? Math.round((a.total_pnl_usd / a.total) * 100) / 100 : 0,
+      avg_pnl_pct: a.total > 0 ? Math.round((a.total_pnl_pct / a.total) * 100) / 100 : 0,
+    }))
+    .sort((a, b) => b.win_rate_pct - a.win_rate_pct);
+
+  return { authors, total_discord_tracked: entries.length };
+}
+
+// ─── PnL Reconciliation ───────────────────────────────────────
+
+/**
+ * Backfill performance records that have zero/fake PnL because the
+ * Meteora closed-positions API hadn't settled when the position was closed.
+ *
+ * Re-fetches from the on-chain API and updates records with real values.
+ *
+ * @param {string} walletAddress - Wallet address to query closed positions for
+ * @returns {{ fixed: number, skipped: number, errors: string[] }}
+ */
+export async function reconcileClosedPnl(walletAddress) {
+  if (!walletAddress) {
+    try {
+      const { deriveAddress } = await import("./tools/wallet.js");
+      const pk = process.env.WALLET_PRIVATE_KEY;
+      walletAddress = pk ? deriveAddress(pk) : null;
+    } catch { /* will return early below */ }
+  }
+  if (!walletAddress) return { fixed: 0, skipped: 0, errors: ["No wallet address available"] };
+
+  const data = load();
+  const perf = data.performance;
+  if (!perf.length) return { fixed: 0, skipped: 0, errors: [] };
+
+  const ZERO_CUTOFF = 0.001;
+  let fixed = 0, skipped = 0;
+  const errors = [];
+
+  for (let i = 0; i < perf.length; i++) {
+    const r = perf[i];
+    // Only fix records that look unsettled: zero final_value and positive initial_value
+    const isUnsettled =
+      (r.final_value_usd == null || r.final_value_usd < ZERO_CUTOFF) &&
+      (r.initial_value_usd != null && r.initial_value_usd > 0);
+    if (!isUnsettled) continue;
+    if (!r.pool) { skipped++; continue; }
+
+    try {
+      const url = `https://dlmm.datapi.meteora.ag/positions/${r.pool}/pnl?user=${walletAddress}&status=closed&pageSize=50&page=1`;
+      const res = await fetch(url);
+      if (!res.ok) { errors.push(`${r.pool_name}: HTTP ${res.status}`); continue; }
+      const body = await res.json();
+      const entry = (body.positions || []).find(
+        (p) => p.positionAddress === r.position,
+      );
+      if (!entry) { skipped++; continue; }
+
+      const pnlUsd = parseFloat(entry.pnlUsd || 0);
+      const finalValue = parseFloat(entry.allTimeWithdrawals?.total?.usd || 0);
+      const initialValue = parseFloat(entry.allTimeDeposits?.total?.usd || 0);
+      const feesUsd = parseFloat(entry.allTimeFees?.total?.usd || 0) || r.fees_earned_usd || 0;
+
+      if (finalValue > 0) {
+        r.final_value_usd = finalValue;
+        r.initial_value_usd = initialValue || r.initial_value_usd;
+        r.fees_earned_usd = feesUsd;
+        r.pnl_usd = Math.round((finalValue + feesUsd - r.initial_value_usd) * 100) / 100;
+        r.pnl_pct = r.initial_value_usd > 0
+          ? Math.round(((r.pnl_usd / r.initial_value_usd) * 100) * 100) / 100
+          : r.pnl_pct;
+        r._reconciled_at = new Date().toISOString();
+        fixed++;
+        log("reconcile", `Backfilled ${r.pool_name}: pnl=${r.pnl_usd}, fees=${r.fees_earned_usd}, final=${r.final_value_usd}`);
+      } else {
+        skipped++;
+      }
+    } catch (e) {
+      errors.push(`${r.pool_name}: ${e.message}`);
+    }
+  }
+
+  if (fixed > 0) {
+    save(data);
+    log("reconcile", `PnL reconciliation complete: ${fixed} fixed, ${skipped} skipped, ${errors.length} errors`);
+  }
+
+  return { fixed, skipped, errors };
 }

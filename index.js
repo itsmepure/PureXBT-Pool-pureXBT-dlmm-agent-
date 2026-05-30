@@ -101,6 +101,20 @@ const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
 
+const FAST_OOR_MINUTES = 10;
+const FAST_OOR_FEE_TVL_MAX = 0.10;
+const FAST_OOR_ORGANIC_MAX = 75;
+
+function getEffectiveOorTimeout(trackedPosition) {
+  if (!trackedPosition) return config.management.outOfRangeWaitMinutes;
+  const feeTvl = Number(trackedPosition.fee_tvl_ratio ?? trackedPosition.initial_fee_tvl_24h ?? 0);
+  const organic = Number(trackedPosition.organic_score ?? 0);
+  if (feeTvl < FAST_OOR_FEE_TVL_MAX || organic < FAST_OOR_ORGANIC_MAX) {
+    return FAST_OOR_MINUTES;
+  }
+  return config.management.outOfRangeWaitMinutes;
+}
+
 /** Strip <think>...</think> reasoning blocks that some models leak into output */
 function stripThink(text) {
   if (!text) return text;
@@ -279,6 +293,9 @@ export async function runManagementCycle({ silent = false } = {}) {
       // Claim rule
       if ((p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
         actionMap.set(p.position, { action: "CLAIM" });
+        if (config.management.autoSwapAfterClaim) {
+          log("cron", `Auto-compound: ${p.pair} has $${(p.unclaimed_fees_usd ?? 0).toFixed(2)} unclaimed — will claim + swap to SOL for redeploy`);
+        }
         continue;
       }
       actionMap.set(p.position, { action: "STAY" });
@@ -384,7 +401,9 @@ After executing, write a brief one-line result per position.
         else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
-        if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
+        const trackedPos = getTrackedPosition(p.position);
+        const oorTimeout = getEffectiveOorTimeout(trackedPos);
+        if (!p.in_range && p.minutes_out_of_range >= oorTimeout) {
           notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range }).catch(() => { });
         }
       }
@@ -469,7 +488,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Phase 1: Deterministic pre-screening — score, enrich memory/wallets in parallel, return top 5
     const prescreenResult = await prescreenPools({ limit: 5 }).catch((e) => {
       log("screening_error", `Prescreen failed: ${e.message}`);
-      return { candidates: [], rejected: [], totalScreened: 0 };
+      return { candidates: [], rejected: [], totalScreened: 0, ms: 0 };
     });
     const prescreened = prescreenResult.candidates || [];
     const earlyFilteredExamples = (prescreenResult.rejected || []).slice(0, 5)
@@ -683,7 +702,11 @@ STEPS:
 2. Decide if any candidate is actually worth deploying. One surviving candidate is not automatically good enough.
 3. Pick the best candidate based on prescreen score, narrative quality, smart wallets, and pool metrics.
 4. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
-   bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
+   bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}))
+      THEN apply adaptive floor:
+      - if fee_tvl < 0.15% → +15 bins below (wider downside)
+      - if organic < 80 → +10 bins below (wider downside)
+      Final: clamp to [60, 120].
    pass deploy_position.volatility = the candidate volatility value.
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
@@ -807,13 +830,24 @@ export function startCronJobs() {
       const posList = positions?.positions || [];
       const totalValue = posList.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
       const totalUnclaimed = posList.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
-      const oorCount = posList.filter(p => !p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes).length;
+      const oorCount = posList.filter(p => {
+        const tracked = getTrackedPosition(p.position);
+        return !p.in_range && p.minutes_out_of_range >= getEffectiveOorTimeout(tracked);
+      }).length;
       const pnlValues = posList.map(p => p.pnl_pct ?? 0);
       const avgPnl = pnlValues.length ? (pnlValues.reduce((s, v) => s + v, 0) / pnlValues.length).toFixed(1) : "N/A";
       const solMode = config.management.solMode;
       const cur = solMode ? "SOL" : "USD";
       const balanceLine = portfolio ? `${portfolio.sol.toFixed(3)} SOL ($${portfolio.sol_usd})` : "unavailable";
       log("health", `Portfolio: ${posList.length} positions | ${cur} ${totalValue.toFixed(2)} | unclaimed fees ${cur} ${totalUnclaimed.toFixed(2)} | avg PnL ${avgPnl}% | OOR: ${oorCount} | wallet: ${balanceLine}`);
+
+      // Auto-reconcile unsettled PnL records (run every hour, minimal overhead)
+      try {
+        const { reconcileClosedPnl } = await import("./lessons.js");
+        const envKey = process.env.WALLET_PRIVATE_KEY || "";
+        const addr = envKey ? (await import("./tools/wallet.js")).deriveAddress(envKey) : "";
+        if (addr) await reconcileClosedPnl(addr);
+      } catch { /* reconciliation is best-effort, never block health check */ }
     } catch (error) {
       log("cron_error", `Health check failed: ${error.message}`);
     }
@@ -1012,11 +1046,12 @@ function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 3, reason: `pumped far above range (active_bin ${position.active_bin} > upper ${position.upper_bin} + ${oorThreshold} threshold, range=${range})` };
   }
+  const effectiveOorMinutes = getEffectiveOorTimeout(tracked);
   if (
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin &&
-    (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
+    (position.minutes_out_of_range ?? 0) >= effectiveOorMinutes
   ) {
     return { action: "CLOSE", rule: 4, reason: "OOR" };
   }
@@ -1026,6 +1061,15 @@ function getDeterministicCloseRule(position, managementConfig) {
     (position.age_minutes ?? 0) >= 60
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
+  }
+  // Rule 6: F/TVL Decay — pool health degraded from entry
+  const trackedPos = getTrackedPosition(position.position);
+  if (trackedPos && trackedPos.initial_fee_tvl_24h != null && position.fee_per_tvl_24h != null) {
+    const decayPct = managementConfig.feeTvlDecayPct ?? 50;
+    const threshold = trackedPos.initial_fee_tvl_24h * (1 - decayPct / 100);
+    if (position.fee_per_tvl_24h < threshold && (position.age_minutes ?? 0) >= managementConfig.minAgeBeforeYieldCheck) {
+      return { action: "CLOSE", rule: 6, reason: `F/TVL decay ${trackedPos.initial_fee_tvl_24h.toFixed(2)}% → ${position.fee_per_tvl_24h.toFixed(2)}% (−${decayPct}% threshold)` };
+    }
   }
   return null;
 }
@@ -1090,7 +1134,7 @@ function formatConfigSnapshot() {
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
     `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
-    `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
+    `OOR: ${config.management.outOfRangeWaitMinutes}m default | fast ${FAST_OOR_MINUTES}m if fee_tvl < ${FAST_OOR_FEE_TVL_MAX}% or organic < ${FAST_OOR_ORGANIC_MAX} | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
     `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,

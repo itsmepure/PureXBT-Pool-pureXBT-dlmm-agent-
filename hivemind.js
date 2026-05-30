@@ -203,6 +203,12 @@ export async function pullHiveMindLessons(limit = 12) {
     return cache.sharedLessons;
   } catch (error) {
     log("hivemind_warn", `Lesson pull failed: ${error.message}`);
+    // Fallback: return cached lessons if available
+    const cached = readCache();
+    if (cached.sharedLessons?.length > 0) {
+      log("hivemind", `Using ${cached.sharedLessons.length} cached lessons (pull failed)`);
+      return cached.sharedLessons;
+    }
     return null;
   }
 }
@@ -220,6 +226,12 @@ export async function pullHiveMindPresets() {
     return cache.presets;
   } catch (error) {
     log("hivemind_warn", `Preset pull failed: ${error.message}`);
+    // Fallback: return cached presets if available
+    const cached = readCache();
+    if (cached.presets?.length > 0) {
+      log("hivemind", `Using ${cached.presets.length} cached presets (pull failed)`);
+      return cached.presets;
+    }
     return null;
   }
 }
@@ -342,5 +354,63 @@ export async function pushHivePerformanceEvent(perf) {
   } catch (error) {
     log("hivemind_warn", `Performance push failed: ${error.message}`);
     return null;
+  }
+}
+
+/**
+ * Export local lessons to a shared JSON file for other agents to import.
+ */
+export function exportLocalLessons(maxAgeHours = 720) {
+  try {
+    const lessonsPath = path.join(__dirname, "lessons.json");
+    if (!fs.existsSync(lessonsPath)) return { exported: 0 };
+    const data = JSON.parse(fs.readFileSync(lessonsPath, "utf8"));
+    const lessons = (data.lessons || []).filter((l) => {
+      if (!l.created_at) return true;
+      const ageHours = (Date.now() - new Date(l.created_at).getTime()) / 3600000;
+      return ageHours <= maxAgeHours;
+    });
+    const sharedPath = path.join(__dirname, "shared-lessons.json");
+    fs.writeFileSync(sharedPath, JSON.stringify({ lessons, exportedAt: new Date().toISOString() }, null, 2));
+    log("hivemind", `Exported ${lessons.length} local lessons to shared-lessons.json`);
+    return { exported: lessons.length };
+  } catch (error) {
+    log("hivemind_warn", `Export failed: ${error.message}`);
+    return { exported: 0, error: error.message };
+  }
+}
+
+/**
+ * Import lessons from a shared JSON file into local lessons database.
+ */
+export function importLocalLessons() {
+  try {
+    const sharedPath = path.join(__dirname, "shared-lessons.json");
+    if (!fs.existsSync(sharedPath)) return { imported: 0, reason: "no shared file" };
+    const shared = JSON.parse(fs.readFileSync(sharedPath, "utf8"));
+    if (!Array.isArray(shared.lessons) || shared.lessons.length === 0) return { imported: 0, reason: "empty" };
+
+    const lessonsPath = path.join(__dirname, "lessons.json");
+    const local = fs.existsSync(lessonsPath)
+      ? JSON.parse(fs.readFileSync(lessonsPath, "utf8"))
+      : { lessons: [], performance: [] };
+
+    const existingIds = new Set((local.lessons || []).map((l) => l.id).filter(Boolean));
+    let imported = 0;
+    for (const lesson of shared.lessons) {
+      if (lesson.id && existingIds.has(lesson.id)) continue;
+      local.lessons = local.lessons || [];
+      local.lessons.push({ ...lesson, imported: true, imported_at: new Date().toISOString() });
+      imported++;
+    }
+
+    if (imported > 0) {
+      fs.writeFileSync(lessonsPath, JSON.stringify(local, null, 2));
+      log("hivemind", `Imported ${imported} shared lessons`);
+    }
+    return { imported };
+  } catch (error) {
+    log("hivemind_warn", `Import failed: ${error.message}`);
+    return { imported: 0, error: error.message };
   }
 }

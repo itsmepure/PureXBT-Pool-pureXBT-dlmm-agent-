@@ -1111,6 +1111,53 @@ Blacklisted tokens are filtered BEFORE the LLM even sees pool candidates.`,
       }
     }
   },
+
+  // ─── Discord Signals (Reference/Learning) ───────────────────
+
+  {
+    type: "function",
+    function: {
+      name: "get_discord_signals",
+      description: `Read pending Discord signals from the LP Army listener.
+These are TOKENS MENTIONED by community members in Discord channels — NOT confirmed buy signals.
+Use this as REFERENCE MATERIAL and LEARNING INPUT only. Discord signals are NOT 100% accurate.
+
+Each signal includes: pool_address, base_mint, base_symbol, discord_author, discord_channel,
+rug_score, total_fees_sol, token_age_minutes.
+
+INTEGRATION RULES:
+- Treat Discord signals as ONE input among many — always cross-check with your own screening (organic score, holders, fees, volume).
+- A Discord signal with low rug_score and high fees is more值得 investigating than one with no data.
+- Never deploy solely because a Discord signal exists. The signal is a starting point for research, not a deploy trigger.
+- If a Discord signal's pool already passed your screening criteria, that's a stronger combined signal.
+- Use Discord signal outcomes to LEARN: track which authors/channels produce better signals over time.`,
+      parameters: {
+        type: "object",
+        properties: {
+          limit: {
+            type: "number",
+            description: "Number of signals to return. Default 10, max 50."
+          }
+        }
+      }
+    }
+  },
+
+  // ─── Discord Author Stats ───────────────────────────────────
+
+  {
+    type: "function",
+    function: {
+      name: "get_author_stats",
+      description: `Get per-author Discord signal accuracy stats based on closed position outcomes.
+Shows win rate, average PnL, and signal count for each Discord author whose signals led to actual trades.
+Use this to learn which community members give better signals over time.`,
+      parameters: {
+        type: "object",
+        properties: {}
+      }
+    }
+  },
 ];
 
 export const tools = toolDefinitions.map((tool) => ({

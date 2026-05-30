@@ -36,6 +36,83 @@ function save(data) {
   fs.writeFileSync(POOL_MEMORY_FILE, JSON.stringify(data, null, 2));
 }
 
+// ─── Open-position tracking ────────────────────────────────────
+
+/**
+ * Mark a pool as having an open position (called after successful deploy).
+ * Ensures screener sees the pool in history and won't treat it as "new".
+ */
+export function markPoolOpened(poolAddress, data = {}) {
+  if (!poolAddress) return;
+  const db = load();
+  if (!db[poolAddress]) {
+    db[poolAddress] = {
+      name: data.pool_name || poolAddress.slice(0, 8),
+      base_mint: data.base_mint || null,
+      deploys: [],
+      total_deploys: 0,
+      avg_pnl_pct: 0,
+      win_rate: 0,
+      adjusted_win_rate: 0,
+      adjusted_win_rate_sample_count: 0,
+      last_deployed_at: null,
+      last_outcome: null,
+      notes: [],
+    };
+  }
+  const entry = db[poolAddress];
+  entry.open_position = {
+    position: data.position || null,
+    deployed_at: data.deployed_at || new Date().toISOString(),
+    strategy: data.strategy || null,
+    volatility: data.volatility ?? null,
+    amount_sol: data.amount_sol ?? null,
+    base_mint: data.base_mint || entry.base_mint || null,
+  };
+  entry.last_deployed_at = entry.open_position.deployed_at;
+  if (data.pool_name && !entry.name) entry.name = data.pool_name;
+  if (data.base_mint && !entry.base_mint) entry.base_mint = data.base_mint;
+  save(db);
+  log("pool-memory", `Marked pool ${poolAddress.slice(0, 8)} as OPEN (${entry.name})`);
+}
+
+/**
+ * Mark a pool's open position as closed (e.g. auto-close when position
+ * disappears from chain). Optionally sets cooldown to prevent re-deploy.
+ */
+export function markPoolClosed(poolAddress, { reason, cooldownHours = 2, base_mint } = {}) {
+  if (!poolAddress) return;
+  const db = load();
+  const entry = db[poolAddress];
+  if (!entry) return;
+  // Clear open position marker
+  entry.open_position = null;
+  // Record synthetic close deploy entry
+  entry.deploys.push({
+    deployed_at: entry.last_deployed_at || null,
+    closed_at: new Date().toISOString(),
+    pnl_pct: null,
+    pnl_usd: null,
+    fees_earned_usd: null,
+    close_reason: reason || "externally_closed",
+    strategy: null,
+    volatility_at_deploy: null,
+    minutes_held: null,
+    range_efficiency: null,
+  });
+  entry.total_deploys = entry.deploys.length;
+  entry.last_outcome = "unknown";
+  // Set cooldown to prevent immediate re-deploy
+  if (cooldownHours > 0) {
+    const mint = base_mint || entry.base_mint;
+    setPoolCooldown(entry, cooldownHours, reason || "externally_closed");
+    if (mint) setBaseMintCooldown(db, mint, cooldownHours, reason || "externally_closed");
+    log("pool-memory", `Cooldown set for ${entry.name} (${cooldownHours}h, reason: ${reason})`);
+  }
+  save(db);
+  log("pool-memory", `Marked pool ${poolAddress.slice(0, 8)} as CLOSED (${reason})`);
+}
+
 function isOorCloseReason(reason) {
   const text = String(reason || "").trim().toLowerCase();
   return text === "oor" || text.includes("out of range") || text.includes("oor");
