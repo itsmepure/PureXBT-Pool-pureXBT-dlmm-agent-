@@ -897,6 +897,49 @@ export function listLessons({ role = null, pinned = null, tag = null, limit = 30
 }
 
 /**
+ * Delete a single lesson by ID.
+ */
+export function deleteLesson(id) {
+  const data = load();
+  const idx = data.lessons.findIndex((l) => l.id === id);
+  if (idx === -1) return { found: false };
+  const removed = data.lessons.splice(idx, 1)[0];
+  save(data);
+  log("lessons", `Deleted lesson ${id}: ${removed.rule.slice(0, 80)}`);
+  return { found: true, deleted: true, id, rule: removed.rule };
+}
+
+/**
+ * Update a lesson — edit rule, tags, pinned status, or role.
+ * Pass only the fields you want to change; omitted fields are left unchanged.
+ */
+export function manageLesson(id, { rule, tags, pinned, role } = {}) {
+  const data = load();
+  const lesson = data.lessons.find((l) => l.id === id);
+  if (!lesson) return { found: false };
+  const changes = [];
+  if (rule !== undefined) {
+    const safeRule = sanitizeLessonText(rule);
+    if (safeRule) { lesson.rule = safeRule; changes.push("rule"); }
+  }
+  if (Array.isArray(tags)) { lesson.tags = [...new Set(tags)]; changes.push("tags"); }
+  if (pinned !== undefined) {
+    lesson.pinned = !!pinned;
+    changes.push(pinned ? "pinned" : "unpinned");
+  }
+  if (role !== undefined) {
+    lesson.role = role || null;
+    changes.push(`role=${role || "all"}`);
+  }
+  if (changes.length > 0) {
+    lesson.updated_at = new Date().toISOString();
+    save(data);
+    log("lessons", `Managed lesson ${id}: ${changes.join(", ")}`);
+  }
+  return { found: true, updated: changes, id, rule: lesson.rule, pinned: !!lesson.pinned, role: lesson.role || "all" };
+}
+
+/**
  * Remove lessons matching a keyword in their rule text (case-insensitive).
  */
 export function removeLessonsByKeyword(keyword) {

@@ -96,8 +96,9 @@ export const config = {
     maxPositions:    risk.maxPositions    ?? 3,
     maxDeployAmount: risk.maxDeployAmount ?? 50,
     maxSwapSol:      risk.maxSwapSol      ?? null,
-    hardStopLossPct: risk.hardStopLossPct ?? null,
-    dailyMaxDrawdownSol: risk.dailyMaxDrawdownSol ?? null,
+    hardStopLossPct:      risk.hardStopLossPct      ?? null,
+    dailyMaxDrawdownSol:  risk.dailyMaxDrawdownSol  ?? null,
+    dailyMaxStopLosses:   risk.dailyMaxStopLosses   ?? 3,
   },
 
   // ─── Pool Screening Thresholds ───────────
@@ -129,6 +130,8 @@ export const config = {
     minTokenAgeHours:  screening.minTokenAgeHours   ?? null,
     maxTokenAgeHours:  screening.maxTokenAgeHours   ?? null,
     athFilterPct:      screening.athFilterPct       ?? null,
+    pumpCheckEnabled:  screening.pumpCheckEnabled    ?? false,
+    maxPumpPct1h:      screening.maxPumpPct1h        ?? 10,
   },
 
   // ─── Position Management ────────────────

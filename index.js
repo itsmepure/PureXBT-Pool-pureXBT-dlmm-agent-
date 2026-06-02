@@ -491,7 +491,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
       return { candidates: [], rejected: [], totalScreened: 0, ms: 0 };
     });
     const prescreened = prescreenResult.candidates || [];
-    const earlyFilteredExamples = (prescreenResult.rejected || []).slice(0, 5)
+    const rejectedArr = Array.isArray(prescreenResult.rejected) ? prescreenResult.rejected : [];
+    const earlyFilteredExamples = rejectedArr.slice(0, 5)
       .map((r) => ({ name: r.name, reason: r.reason }));
     log("screening", `Prescreen: ${prescreenResult.totalScreened} screened → ${prescreened.length} qualified (${prescreenResult.ms}ms)`);
 
@@ -863,7 +864,7 @@ export function startCronJobs() {
     await maybeRunMissedBriefing();
   }, { timezone: 'UTC' });
 
-  // Lightweight 30s PnL poller — updates trailing TP state between management cycles, no LLM
+  // Lightweight 10s PnL poller — updates trailing TP state between management cycles, no LLM
   let _pnlPollBusy = false;
   const _directClosing = new Set(); // prevent duplicate close attempts during execution
 
@@ -941,7 +942,7 @@ export function startCronJobs() {
     } finally {
       _pnlPollBusy = false;
     }
-  }, 30_000);
+  }, 10_000);
 
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
   // Store interval ref so stopCronJobs can clear it

@@ -75,8 +75,7 @@ function formatToolSteps(result) {
 }
 
 async function handlePostChat(req, res) {
-  const auth = authCheck(req, res);
-  if (!auth) return;
+  if (!requireOwner(req, res)) return;
   const body = await parseBody(req);
   const message = String(body.message || "").trim();
   if (!message) return jsonReply(res, 400, { error: "Pesan tidak boleh kosong" });
@@ -134,8 +133,7 @@ async function handlePostChat(req, res) {
 }
 
 function handleGetChatHistory(req, res) {
-  const auth = authCheck(req, res);
-  if (!auth) return;
+  if (!requireOwner(req, res)) return;
   const url = new URL(req.url, "http://localhost");
   const wallet = (url.searchParams.get("wallet") || "").trim();
   const history = loadChatHistory(wallet || undefined);
@@ -151,8 +149,7 @@ function handleGetChatHistory(req, res) {
 }
 
 function handleDeleteChatHistory(req, res) {
-  const auth = authCheck(req, res);
-  if (!auth) return;
+  if (!requireOwner(req, res)) return;
   try { fs.unlinkSync(CHAT_HISTORY_PATH); } catch { }
   jsonReply(res, 200, { ok: true, cleared: true });
 }
@@ -174,17 +171,35 @@ function parseBody(req) {
   });
 }
 
-function authCheck(req, res) {
-  if (!PASSWORD) return true;
+// Auth system with owner/preview roles
+// Owner: Basic auth with DASHBOARD_PASSWORD (from .env)
+// Preview: x-dashboard-role header = "preview" (no password needed)
+function getRole(req) {
+  const roleHeader = (req.headers["x-dashboard-role"] || "").toLowerCase();
+  if (roleHeader === "preview") return "preview";
+  if (!PASSWORD) return "owner";
   const auth = req.headers["authorization"] || "";
   const b64 = auth.replace("Basic ", "");
   const pw = Buffer.from(b64, "base64").toString("utf8").split(":")[1] || "";
-  if (pw !== PASSWORD) {
-    res.writeHead(401);
-    res.end(JSON.stringify({ ok: false, error: "Unauthorized" }));
+  if (pw !== PASSWORD) return null;
+  return "owner";
+}
+
+function requireOwner(req, res) {
+  const role = getRole(req);
+  if (role === "owner") return true;
+  if (role === "preview") {
+    res.writeHead(403, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+    res.end(JSON.stringify({ ok: false, error: "Forbidden — owner login required", role: "preview" }));
     return false;
   }
-  return true;
+  res.writeHead(401, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+  res.end(JSON.stringify({ ok: false, error: "Unauthorized" }));
+  return false;
+}
+
+function authCheck(req, res) {
+  return requireOwner(req, res);
 }
 
 function getClientIP(req) {
@@ -205,6 +220,23 @@ function maskSecret(value) {
   if (!text) return "";
   if (text.length <= 8) return "********";
   return `${text.slice(0, 4)}...${text.slice(-4)}`;
+}
+
+function sanitizeForPreview(data) {
+  if (!data || typeof data !== "object") return data;
+  if (Array.isArray(data)) return data.map(sanitizeForPreview);
+  const out = {};
+  const SENSITIVE = new Set(["privateKey", "apiKey", "key", "secret", "password", "token", "maskedKey", "apiKeyMasked", "llm"]);
+  for (const k of Object.keys(data)) {
+    if (SENSITIVE.has(k) || k.toLowerCase().includes("key") || k.toLowerCase().includes("secret")) {
+      out[k] = "*** PREVIEW MODE ***";
+    } else if (typeof data[k] === "object" && data[k] !== null) {
+      out[k] = sanitizeForPreview(data[k]);
+    } else {
+      out[k] = data[k];
+    }
+  }
+  return out;
 }
 
 function readUserConfig() {
@@ -256,11 +288,12 @@ async function getBalanceForAddress(address) {
 
 // ─── API: State ─────────────────────────────────────────────────
 const _stateCache = { ts: 0, payload: null };
-const STATE_CACHE_MS = 5_000; // serve cached state for 5s (matches dashboard poll interval)
+const STATE_CACHE_MS = 1_000; // serve cached state for 1s (matches dashboard poll interval)
 
 async function handleState(req, res) {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const walletFilter = url.searchParams.get("wallet") || "";
+  const role = getRole(req);
   // Auto-bust cache when pool-memory.json was recently updated (deploy/close event)
   let forceRefresh = url.searchParams.get("force") === "1";
   if (!forceRefresh && fs.existsSync(POOL_MEMORY_FILE)) {
@@ -270,7 +303,7 @@ async function handleState(req, res) {
     } catch (_) { /* skip */ }
   }
   // serve from cache when fresh and no force trigger
-  if (!forceRefresh && _stateCache.payload && (Date.now() - _stateCache.ts) < STATE_CACHE_MS) {
+  if (role !== "preview" && !forceRefresh && _stateCache.payload && (Date.now() - _stateCache.ts) < STATE_CACHE_MS) {
     res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
     res.end(_stateCache.payload);
     return;
@@ -281,7 +314,7 @@ async function handleState(req, res) {
     const posOpts = (walletFilter && walletFilter !== "all") ? { wallet_address: walletFilter } : {};
     const [posResult, balances, tracked] = await Promise.all([
       getMyPositions({ ...posOpts, force: forceRefresh }).catch(() => ({ positions: [], wallet: null })),
-      getWalletBalances().catch(() => ({ sol: 0, tokens: [] })),
+      getWalletBalances().catch(() => ({ sol: 0, sol_price: 0, tokens: [] })),
       getTrackedPositions(true) || {},
     ]);
 
@@ -343,7 +376,12 @@ async function handleState(req, res) {
         pnlUsd: typeof pnlUsd === "number" ? parseFloat(pnlUsd.toFixed(2)) : null,
         valueUsd: typeof valueUsd === "number" ? parseFloat(valueUsd.toFixed(2)) : null,
         feesUsd: typeof feesUsd === "number" ? parseFloat(feesUsd.toFixed(2)) : null,
-        feesSol: typeof feesSol === "number" ? parseFloat(feesSol.toFixed(4)) : null,
+        feesSol: (() => {
+          const solNum = typeof feesSol === "number" ? feesSol : null;
+          if (solNum != null && solNum > 0) return parseFloat(solNum.toFixed(4));
+          if (typeof feesUsd === "number" && feesUsd > 0 && balances?.sol_price > 0) return parseFloat((feesUsd / balances.sol_price).toFixed(4));
+          return solNum != null ? parseFloat(solNum.toFixed(4)) : null;
+        })(),
         status,
         binRange: t.bin_range || { min: null, max: null },
         activeBin: typeof p.activeBin === "number" ? p.activeBin : null,
@@ -385,7 +423,7 @@ async function handleState(req, res) {
           pnlUsd: null,
           valueUsd: t.initial_value_usd || null,
           feesUsd: t.total_fees_claimed_usd || 0,
-          feesSol: null,
+          feesSol: (t.total_fees_claimed_usd && balances?.sol_price > 0 ? parseFloat(((t.total_fees_claimed_usd || 0) / balances.sol_price).toFixed(4)) : null),
           status: t.out_of_range_since ? "OOR" : "IN_RANGE",
           binRange: t.bin_range || { min: null, max: null },
           activeBin: t.active_bin_at_deploy || null,
@@ -456,10 +494,11 @@ async function handleState(req, res) {
     } catch (_) { /* pool-memory unavailable */ }
     const totalPnlUsd = openPnlUsd + realizedPnlUsd;
 
-    const payload = JSON.stringify({
+    const payload = {
       ok: true,
       dryRun: process.env.DRY_RUN === "true",
       balanceSol,
+      solPrice: balances.sol_price || 0,
       tokens: balances.tokens || [],
       positions: enriched,
       positionCount: enriched.length,
@@ -477,11 +516,17 @@ async function handleState(req, res) {
       dailyStopCount: 0,
       dailyStopDate: "",
       lastUpdated: new Date().toISOString(),
-    });
-    _stateCache.payload = payload;
-    _stateCache.ts = Date.now();
+    };
+    if (role === "preview") {
+      payload.positions = (payload.positions || []).map(p => ({ ...p, address: "***", wallet: "***" }));
+    }
+    const payloadJson = JSON.stringify(payload);
+    if (role !== "preview") {
+      _stateCache.payload = payloadJson;
+      _stateCache.ts = Date.now();
+    }
     res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-    res.end(payload);
+    res.end(payloadJson);
   } catch (err) {
     jsonReply(res, 500, { ok: false, error: err.message });
   }
@@ -499,11 +544,16 @@ function handleGetConfig(req, res) {
     jupiter: config.jupiter ? { ...config.jupiter } : {},
     hiveMind: { enabled: !!(config.hiveMind?.url && config.hiveMind.url !== "https://api.agentmeridian.xyz") },
   };
+  const role = getRole(req);
+  if (role === "preview") {
+    safe.llm = sanitizeForPreview(safe.llm);
+    safe.hiveMind = { enabled: safe.hiveMind.enabled, note: "*** PREVIEW MODE ***" };
+  }
   jsonReply(res, 200, { ok: true, config: safe });
 }
 
 async function handlePostConfig(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const body = await parseBody(req);
   const changes = body?.changes || (body?.key ? { [body.key]: body.value } : body);
   if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
@@ -523,6 +573,7 @@ async function handlePostConfig(req, res) {
 // ─── API: Custom LLM ─────────────────────────────────────────────
 
 function handleGetLLM(req, res) {
+  if (getRole(req) === "preview") return jsonReply(res, 200, { ok: true, llm: { baseUrl: "*** PREVIEW MODE ***", apiKeySet: false, apiKeyMasked: "*** PREVIEW MODE ***", model: "*** PREVIEW MODE ***", managementModel: "*** PREVIEW MODE ***", screeningModel: "*** PREVIEW MODE ***", generalModel: "*** PREVIEW MODE ***", restartRequired: true, note: "Preview mode — LLM config hidden" }});
   const apiKey = process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || "";
   const activeModel = process.env.LLM_MODEL || config.llm?.generalModel || "";
   jsonReply(res, 200, {
@@ -541,7 +592,7 @@ function handleGetLLM(req, res) {
 }
 
 async function handlePostLLM(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const body = await parseBody(req);
   if (!body || typeof body !== "object") {
     return jsonReply(res, 400, { ok: false, error: "Invalid JSON body" });
@@ -770,11 +821,35 @@ async function handleHistory(req, res) {
     }
 
     // 4. Close-event lookup from decision-log (has actual PnL data)
+    // Prefer the entry with real metrics — duplicate closes (e.g. GENERAL then MANAGER) can have $0 fees
     const closeMap = {};
     for (const d of decisions) {
       if (d.type === "close" || d.action === "close") {
         const key = (d.position || "").toLowerCase();
-        closeMap[key] = d;
+        const existing = closeMap[key];
+        if (!existing) { closeMap[key] = d; continue; }
+        // Prefer entry with non-zero metrics (MANAGER close has real PnL, GENERAL close may have $0)
+        const dPnl = Number(d.metrics?.pnl_usd) || 0;
+        const dFees = Number(d.metrics?.fees_usd) || 0;
+        const ePnl = Number(existing.metrics?.pnl_usd) || 0;
+        const eFees = Number(existing.metrics?.fees_usd) || 0;
+        // Keep the one with more data (non-zero pnl or fees)
+        if ((dPnl !== 0 || dFees !== 0) && (ePnl === 0 && eFees === 0)) {
+          closeMap[key] = d;
+        } else if ((dPnl !== 0 || dFees !== 0) && (ePnl !== 0 || eFees !== 0)) {
+          // Both have data — keep the one with higher absolute pnl (more reliable close)
+          if (Math.abs(dPnl) > Math.abs(ePnl)) closeMap[key] = d;
+        }
+      }
+    }
+
+    // 4b. Aggregate claim events for fee tracking per position
+    const claimsMap = {};
+    for (const d of decisions) {
+      if (d.type === "claim") {
+        const key2 = (d.position || "").toLowerCase();
+        if (!claimsMap[key2]) claimsMap[key2] = [];
+        claimsMap[key2].push(d);
       }
     }
 
@@ -812,10 +887,27 @@ async function handleHistory(req, res) {
         reason = "not on-chain — closed via Meteora UI or manually";
       }
 
+      // Append claim fee info to reason (from decision-log claim events)
+      const posClaims = claimsMap[addr.toLowerCase()];
+      let totalClaimedFees = 0, claimCount = 0;
+      if (posClaims && posClaims.length > 0) {
+        totalClaimedFees = posClaims.reduce((s, c) => s + (Number(c.metrics?.fees_usd) || 0), 0);
+        claimCount = posClaims.length;
+        if (totalClaimedFees > 0) {
+          const parts = [];
+          if (reason) parts.push(reason);
+          parts.push(claimCount > 1
+            ? `${claimCount} claims = $${totalClaimedFees.toFixed(2)} fees`
+            : `Claimed $${totalClaimedFees.toFixed(2)} fees`);
+          reason = parts.join(" · ");
+        }
+      }
+
       // PnL from close event > live state > pos fields
       const pnlUsd = closeEv?.metrics?.pnl_usd ?? closeEv?.metrics?.pnlUsd ?? pos.pnl_usd ?? 0;
       const pnlPct = closeEv?.metrics?.pnl_pct ?? closeEv?.metrics?.pnlPct ?? pos.pnl_pct ?? pos.peak_pnl_pct ?? 0;
-      const feesUsd = closeEv?.metrics?.fees_usd ?? closeEv?.metrics?.feesUsd ?? pos.total_fees_claimed_usd ?? pos.fees_usd ?? 0;
+      let feesUsd = closeEv?.metrics?.fees_usd ?? closeEv?.metrics?.feesUsd ?? pos.total_fees_claimed_usd ?? pos.fees_usd ?? 0;
+      feesUsd += totalClaimedFees;
       let holdMin = closeEv?.metrics?.minutes_held ?? closeEv?.metrics?.minutesHeld ?? pos.hold_minutes ?? null;
 
       if (holdMin == null && pos.deployed_at) {
@@ -895,7 +987,145 @@ async function handleHistory(req, res) {
   }
 }
 
-// ─── API: Logs ──────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// API: Equity Curve — aggregated cumulative PnL over time
+// GET /api/equity-curve?timeframe=7D&wallet=&base=0
+// ═══════════════════════════════════════════════════════════════
+
+async function handleEquityCurve(req, res) {
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+  const timeframe = url.searchParams.get("timeframe") || "7D";
+  const walletParam = url.searchParams.get("wallet") || "";
+  const baseEquity = parseFloat(url.searchParams.get("base") || "0") || 0;
+
+  const PERIOD_HOURS = { "1D": 24, "7D": 168, "30D": 720, "90D": 2160, "1Y": 8760, "ALL": 999999 };
+  const GROUP_INTERVAL = { "1D": 3, "7D": 6, "30D": 24, "90D": 72, "1Y": 168, "ALL": 720 };
+  const hours = PERIOD_HOURS[timeframe] || 168;
+
+  try {
+    const allHistory = getPerformanceHistory({ hours: Math.max(hours, 8760), limit: 10000 });
+    let positions = (allHistory.positions || []).slice();
+
+    // Filter by timeframe
+    const cutoff = Date.now() - hours * 3600000;
+    positions = positions.filter(r => {
+      const ts = new Date(r.closed_at || r.close_date || r.timestamp || 0).getTime();
+      return ts >= cutoff;
+    });
+
+    // Filter by wallet if specified
+    if (walletParam && walletParam !== "all") {
+      const decisions = getRecentDecisions(5000);
+      const poolWallets = {};
+      for (const d of decisions) {
+        if (d.walletAddress && d.pool) poolWallets[d.pool.toLowerCase()] = d.walletAddress;
+      }
+      positions = positions.filter(r => {
+        const key = (r.pool || "").toLowerCase();
+        return poolWallets[key] === walletParam;
+      });
+    }
+
+    // Sort oldest first
+    positions.sort((a, b) => {
+      const ta = new Date(a.closed_at || a.close_date || 0).getTime();
+      const tb = new Date(b.closed_at || b.close_date || 0).getTime();
+      return ta - tb;
+    });
+
+    if (positions.length === 0) {
+      return jsonReply(res, 200, {
+        ok: true, timeframe, empty: true,
+        summary: {
+          startingEquity: Math.round(baseEquity * 100) / 100,
+          endingEquity: Math.round(baseEquity * 100) / 100,
+          totalPnl: 0, totalFees: 0, returnPct: 0, winRate: 0,
+          totalPositions: 0, openPositions: 0, maxDrawdown: 0,
+        },
+        series: [],
+      });
+    }
+
+    // Build raw data points
+    const rawPoints = positions.map(r => ({
+      ts: new Date(r.closed_at || r.close_date || 0).getTime(),
+      tsIso: new Date(r.closed_at || r.close_date || 0).toISOString(),
+      pnl: Number(r.pnl_usd) || 0,
+      fees: Number(r.fees_earned_usd) || 0,
+      pool: r.pool_name || r.pool || "",
+    }));
+
+    // Aggregate into interval buckets
+    const intervalMs = (GROUP_INTERVAL[timeframe] || 24) * 3600000;
+    let cumPnl = 0, bucketPnl = 0, bucketFees = 0;
+    let bucketTs = rawPoints[0].ts, bucketCount = 0;
+    const series = [];
+
+    for (const p of rawPoints) {
+      if (bucketCount > 0 && p.ts - bucketTs > intervalMs) {
+        series.push({
+          ts: bucketTs, tsIso: new Date(bucketTs).toISOString(),
+          pnl: Math.round(bucketPnl * 100) / 100,
+          fees: Math.round(bucketFees * 100) / 100,
+          cumPnl: Math.round(cumPnl * 100) / 100,
+          equity: Math.round((baseEquity + cumPnl) * 100) / 100,
+          count: bucketCount,
+        });
+        bucketPnl = 0; bucketFees = 0; bucketTs = p.ts; bucketCount = 0;
+      }
+      cumPnl += p.pnl; bucketPnl += p.pnl; bucketFees += p.fees;
+      if (bucketCount === 0 && p.ts < bucketTs) bucketTs = p.ts;
+      bucketCount++;
+    }
+    if (bucketCount > 0) {
+      series.push({
+        ts: bucketTs, tsIso: new Date(bucketTs).toISOString(),
+        pnl: Math.round(bucketPnl * 100) / 100,
+        fees: Math.round(bucketFees * 100) / 100,
+        cumPnl: Math.round(cumPnl * 100) / 100,
+        equity: Math.round((baseEquity + cumPnl) * 100) / 100,
+        count: bucketCount,
+      });
+    }
+
+    // Summary stats
+    const totalPnl = rawPoints.reduce((s, r) => s + r.pnl, 0);
+    const totalFees = rawPoints.reduce((s, r) => s + r.fees, 0);
+    const wins = rawPoints.filter(r => r.pnl > 0).length;
+
+    // Max drawdown from peak
+    let peak = 0, maxDD = 0, running = 0;
+    for (const r of rawPoints) {
+      running += r.pnl;
+      if (running > peak) peak = running;
+      if (peak - running > maxDD) maxDD = peak - running;
+    }
+
+    // Open positions count
+    const tracked = getTrackedPositions();
+    const openCount = tracked.filter(p => !p.closed_at && p.status !== "closed").length;
+
+    jsonReply(res, 200, {
+      ok: true, timeframe,
+      summary: {
+        startingEquity: Math.round(baseEquity * 100) / 100,
+        endingEquity: Math.round((baseEquity + running) * 100) / 100,
+        totalPnl: Math.round(totalPnl * 100) / 100,
+        totalFees: Math.round(totalFees * 100) / 100,
+        returnPct: baseEquity > 0 ? Math.round((running / baseEquity) * 10000) / 100 : 0,
+        winRate: positions.length > 0 ? Math.round((wins / positions.length) * 100) : 0,
+        totalPositions: positions.length,
+        openPositions: openCount,
+        maxDrawdown: Math.round(maxDD * 100) / 100,
+      },
+      series,
+    });
+  } catch (err) {
+    jsonReply(res, 500, { ok: false, error: err.message });
+  }
+}
+
+// ��� API: Logs ��������������������������������������������������
 
 function handleLogs(req, res) {
   const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -934,7 +1164,7 @@ function resolveActionWallet(targetAddress) {
 }
 
 async function handleAction(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const body = await parseBody(req);
   if (!body || !body.action) {
     return jsonReply(res, 400, { ok: false, error: "Missing 'action' in body" });
@@ -1202,11 +1432,16 @@ function handleGetWallets(req, res) {
       : (getAgentRunningInfo() || null),
     config: w.config || {},
   }));
+  const role = getRole(req);
+  if (role === "preview") {
+    const final = safe.map(w => ({ id: w.id, name: w.name, address: "*** PREVIEW MODE ***", maskedKey: "*** PREVIEW MODE ***", active: false, createdAt: w.createdAt, envWallet: w.envWallet, llm: null, running: null, config: {} }));
+    return jsonReply(res, 200, { ok: true, wallets: final });
+  }
   jsonReply(res, 200, { ok: true, wallets: safe });
 }
 
 async function handlePostWallet(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const body = await parseBody(req);
   if (!body || !body.privateKey) {
     return jsonReply(res, 400, { ok: false, error: "privateKey is required" });
@@ -1267,7 +1502,7 @@ async function handlePostWallet(req, res) {
 }
 
 async function handleActivateWallet(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const walletId = req.url.split("/").pop();
   const wallets = loadWallets();
   const wallet = wallets.find((w) => w.id === walletId);
@@ -1282,7 +1517,7 @@ async function handleActivateWallet(req, res) {
 }
 
 async function handlePostWalletLLM(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const walletId = req.url.replace(/\/llm$/, "").split("/").pop();
   const body = await parseBody(req);
   if (!body || typeof body !== "object") {
@@ -1305,7 +1540,7 @@ async function handlePostWalletLLM(req, res) {
 }
 
 async function handleDeleteWallet(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const walletId = req.url.split("/").pop();
   const wallets = loadWallets();
   if (walletId === "_env") return jsonReply(res, 400, { ok: false, error: "Cannot delete .env primary wallet" });
@@ -1443,7 +1678,7 @@ function getAgentStatus(req, res) {
 }
 
 async function handleStartAgent(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const info = getAgentRunningInfo();
   if (info) {
     return jsonReply(res, 200, { ok: true, running: true, pid: info.pid, message: "Already running" });
@@ -1469,7 +1704,7 @@ async function handleStartAgent(req, res) {
 }
 
 async function handleStopAgent(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const info = getAgentRunningInfo();
   if (!info) {
     _primaryAgent = null;
@@ -1499,7 +1734,7 @@ async function handleStopAgent(req, res) {
 }
 
 async function handleStartWallet(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const walletId = req.url.replace(/\/start$/, "").split("/").pop();
   const wallets = loadWallets();
   const wallet = wallets.find((w) => w.id === walletId);
@@ -1540,7 +1775,7 @@ async function handleStartWallet(req, res) {
 }
 
 async function handleStopWallet(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const walletId = req.url.replace(/\/stop$/, "").split("/").pop();
   const wallets = loadWallets();
   const wallet = wallets.find((w) => w.id === walletId);
@@ -1588,7 +1823,7 @@ function resolveWallet(walletId) {
 }
 
 async function handleGetWalletConfig(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const walletId = req.url.replace(/\/config(\?.*)?$/, "").split("/").pop();
   const wallet = resolveWallet(walletId);
   if (!wallet) return jsonReply(res, 404, { ok: false, error: "Wallet not found" });
@@ -1603,7 +1838,7 @@ async function handleGetWalletConfig(req, res) {
 }
 
 async function handlePostWalletConfig(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   const walletId = req.url.replace(/\/config$/, "").split("/").pop();
   const body = await parseBody(req);
   if (!body || typeof body.config !== "object") {
@@ -1700,7 +1935,7 @@ async function handleLearningKnowledge(req, res) {
 // ─── PnL Reconciliation ────────────────────────────────────────
 
 async function handleReconcile(req, res) {
-  if (!authCheck(req, res)) return;
+  if (!requireOwner(req, res)) return;
   try {
     const envKey = process.env.WALLET_PRIVATE_KEY || "";
     const walletAddr = envKey ? (deriveAddress(envKey) || "") : "";
@@ -1728,7 +1963,7 @@ const API_ROUTES = new Set([
   "/api/state", "/api/config", "/api/llm", "/api/llm/status",
   "/api/wallets", "/api/agent", "/api/agent/start", "/api/agent/stop",
   "/api/decisions", "/api/stats", "/api/history", "/api/logs",
-  "/api/action", "/api/chat", "/api/chat/history", "/api/health",
+  "/api/action", "/api/chat", "/api/chat/history", "/api/health", "/api/auth/preview",
     "/api/learning", "/api/learning/knowledge", "/api/reconcile",
 ]);
 
@@ -1745,9 +1980,22 @@ function createServer() {
       res.writeHead(204, {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, x-dashboard-role",
       });
       return res.end();
+    }
+
+    // Auth gate: GET → any role (preview or owner), POST/DELETE → owner only
+    if (isAPI) {
+      if (req.method === "GET") {
+        if (!getRole(req)) {
+          res.writeHead(401, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+          res.end(JSON.stringify({ ok: false, error: "Unauthorized — login or use x-dashboard-role: preview" }));
+          return;
+        }
+      } else {
+        if (!requireOwner(req, res)) return;
+      }
     }
 
   const BANNER_FILE = path.join(__dirname, "banner.png");
@@ -1803,6 +2051,7 @@ function createServer() {
     if (p === "/api/decisions") return handleDecisions(req, res);
     if (p === "/api/stats" && req.method === "GET") return handleStats(req, res);
     if (p === "/api/history" && req.method === "GET") return handleHistory(req, res);
+    if (p === "/api/equity-curve" && req.method === "GET") return handleEquityCurve(req, res);
     if (p === "/api/logs")      return handleLogs(req, res);
     if (p === "/api/action" && req.method === "POST") return handleAction(req, res);
     if (p === "/api/chat" && req.method === "POST") return handlePostChat(req, res);
@@ -1810,7 +2059,10 @@ function createServer() {
     if (p === "/api/chat/history" && req.method === "DELETE") return handleDeleteChatHistory(req, res);
 
     // Health check (no auth)
-    if (p === "/api/health")    return jsonReply(res, 200, { ok: true, ts: new Date().toISOString() });
+    if (p === "/api/health") {
+      const role = getRole(req);
+      return jsonReply(res, 200, { ok: true, ts: new Date().toISOString(), role: role || "anonymous" });
+    }
 
     // Learning API
     if (p === "/api/learning" && req.method === "GET") return handleLearning(req, res);
@@ -1818,6 +2070,10 @@ function createServer() {
 
     // PnL Reconciliation
     if (p === "/api/reconcile" && req.method === "POST") return handleReconcile(req, res);
+
+    if (p === "/api/auth/preview" && req.method === "GET") {
+      return jsonReply(res, 200, { ok: true, role: "preview", message: "Preview mode activated" });
+    }
 
     // 404
     jsonReply(res, 404, { ok: false, error: "Not found" });

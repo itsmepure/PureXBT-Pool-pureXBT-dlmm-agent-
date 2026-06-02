@@ -1293,6 +1293,11 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
                   : parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)
               ) * 10000) / 10000
             : null,
+          unclaimed_fees_sol: lpData
+            ? Math.round(safeNum(lpData.unCollectedFeeNative) * 100000000) / 100000000
+            : binData
+            ? Math.round((parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.amountSol || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.amountSol || 0)) * 100000000) / 100000000
+            : null,
           total_value_usd:    lpData
             ? Math.round((
                 config.management.solMode

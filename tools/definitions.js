@@ -936,6 +936,53 @@ Call list_lessons first to find the lesson ID.`,
     }
   },
 
+  {
+    type: "function",
+    function: {
+      name: "delete_lesson",
+      description: `Permanently delete a lesson from memory by its ID.
+Use list_lessons first to find the lesson ID you want to remove.
+This CANNOT be undone — only delete lessons that are wrong, harmful, or obsolete.`,
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "number", description: "Lesson ID to delete (from list_lessons)" }
+        },
+        required: ["id"]
+      }
+    }
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "manage_lesson",
+      description: `Update an existing lesson — edit its rule text, change tags, pin/unpin, or reassign role.
+Use list_lessons first to find the lesson ID.
+Pass only the fields you want to change; omitted fields stay the same.
+Use this to fix typos, improve wording, retag, or permanently pin/unpin.`,
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "number", description: "Lesson ID (from list_lessons)" },
+          rule: { type: "string", description: "New rule text — keep it concrete and actionable" },
+          tags: {
+            type: "array",
+            items: { type: "string" },
+            description: "Replacement tags array (e.g. ['oor', 'management']). Pass to fully replace all tags."
+          },
+          pinned: { type: "boolean", description: "true to pin, false to unpin, omit to leave unchanged" },
+          role: {
+            type: "string",
+            enum: ["SCREENER", "MANAGER", "GENERAL"],
+            description: "Target agent role (omit to keep current)"
+          }
+        },
+        required: ["id"]
+      }
+    }
+  },
+
   // ─── Performance History ────────────────────────────────────────
 
   {
@@ -1155,6 +1202,40 @@ Use this to learn which community members give better signals over time.`,
       parameters: {
         type: "object",
         properties: {}
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "fetch_discord",
+      description: `Fetch latest Discord LP Army signals with optional filtering by channel and age.
+Use this BEFORE screening to get real-time community alpha on trending pools.
+Filter by maxAgeHours (default 24) to only see recent signals.
+Filter by channel name to focus on a specific Discord channel.
+Returns pool addresses, symbols, signal ages, and channel/author metadata.`,
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "Max signals to return (default 30, max 50)" },
+          maxAgeHours: { type: "number", description: "Only signals from last N hours (default 24, 0 = all)" },
+          channel: { type: "string", description: "Optional channel name filter (e.g. 'lp-army-alpha')" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_discord_channel",
+      description: `Read ALL signals from a specific Discord channel. Use to deep-dive when a channel is hot.
+Returns all signals for that channel with author names and timestamps.`,
+      parameters: {
+        type: "object",
+        properties: {
+          channel: { type: "string", description: "Discord channel name (required, e.g. 'lp-army-alpha')" }
+        },
+        required: ["channel"]
       }
     }
   },

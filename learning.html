@@ -187,7 +187,11 @@ function toggleSection(id) {
 
 async function init() {
   try {
-    const [dataRes, knowledgeRes] = await Promise.all([fetch(API), fetch(KNOWLEDGE_API)]);
+    const headers = { "x-dashboard-role": "preview" };
+    const [dataRes, knowledgeRes] = await Promise.all([
+      fetch(API, { headers }),
+      fetch(KNOWLEDGE_API, { headers })
+    ]);
     const json = await dataRes.json();
     const data = json.data || json;
     _allPerf = data.performance || [];

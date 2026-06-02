@@ -11,7 +11,7 @@ import {
 } from "./dlmm.js";
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
-import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, getAuthorStats } from "../lessons.js";
+import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, deleteLesson, manageLesson, getAuthorStats } from "../lessons.js";
 import { setPositionInstruction } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
@@ -289,6 +289,46 @@ function getDiscordSignals({ limit = 10 } = {}) {
   };
 }
 
+async function fetchDiscord({ limit = 30, maxAgeHours = 24, channel = null } = {}) {
+  try {
+    const raw = fs.readFileSync(DISCORD_SIGNALS_PATH, "utf-8");
+    const all = JSON.parse(raw);
+    let signals = Array.isArray(all) ? all : all.signals || [];
+    if (channel) signals = signals.filter(s => s.discord_channel === channel);
+    if (maxAgeHours > 0 && maxAgeHours < 720) {
+      const cutoff = Date.now() - maxAgeHours * 3600000;
+      signals = signals.filter(s => {
+        const ts = new Date(s.queued_at || s.created_at || 0).getTime();
+        return ts >= cutoff;
+      });
+    }
+    signals.sort((a, b) => new Date(b.queued_at || 0) - new Date(a.queued_at || 0));
+    signals = signals.slice(0, Math.min(limit, 50));
+    return {
+      success: true,
+      signals: signals.map(s => ({
+        pool_address: s.pool_address,
+        base_symbol: s.base_symbol,
+        discord_channel: s.discord_channel,
+        discord_author: s.discord_author,
+        status: s.status || "pending",
+        queued_at: s.queued_at,
+        age_minutes: s.queued_at ? Math.round((Date.now() - new Date(s.queued_at).getTime()) / 60000) : null,
+      })),
+      count: signals.length,
+      total_available: Array.isArray(all) ? all.length : (all.signals || []).length,
+      filters: { limit, maxAgeHours, channel },
+    };
+  } catch (e) {
+    return { success: false, error: e.message, signals: [], count: 0 };
+  }
+}
+
+async function readDiscordChannel({ channel } = {}) {
+  if (!channel) return { success: false, error: "channel name required", signals: [] };
+  return await fetchDiscord({ channel, limit: 30, maxAgeHours: 0 });
+}
+
 // Map tool names to implementations
 const toolMap = {
   discover_pools: discoverPools,
@@ -355,6 +395,8 @@ const toolMap = {
   add_pool_note: addPoolNote,
   get_discord_signals: getDiscordSignals,
   get_author_stats: getAuthorStats,
+  fetch_discord: fetchDiscord,
+  read_discord_channel: readDiscordChannel,
   add_to_blacklist: addToBlacklist,
   remove_from_blacklist: removeFromBlacklist,
   list_blacklist: listBlacklist,
@@ -367,6 +409,16 @@ const toolMap = {
   },
   pin_lesson:   ({ id }) => pinLesson(id),
   unpin_lesson: ({ id }) => unpinLesson(id),
+  delete_lesson: ({ id }) => {
+    const r = deleteLesson(id);
+    if (!r.found) return { error: `Lesson ${id} not found` };
+    return r;
+  },
+  manage_lesson: ({ id, rule, tags, pinned, role }) => {
+    const r = manageLesson(id, { rule, tags, pinned, role });
+    if (!r.found) return { error: `Lesson ${id} not found` };
+    return r;
+  },
   list_lessons: ({ role, pinned, tag, limit } = {}) => listLessons({ role, pinned, tag, limit }),
   clear_lessons: ({ mode, keyword }) => {
     if (mode === "all") {

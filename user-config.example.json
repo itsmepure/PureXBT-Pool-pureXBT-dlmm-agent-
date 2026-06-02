@@ -1,105 +1,91 @@
 {
-  "preset": "custom",
-  "rpcUrl": "https://pump.helius-rpc.com",
-  "llmBaseUrl": "",
-  "llmApiKey": "",
-  "llmModel": "minimax/minimax-m2.7",
-  "dryRun": true,
-
-  "deployAmountSol": 0.5,
-  "maxPositions": 3,
-  "minSolToOpen": 0.55,
-  "maxDeployAmount": 50,
-  "gasReserve": 0.2,
-  "positionSizePct": 0.35,
-
-  "strategy": "bid_ask",
-  "minBinsBelow": 35,
-  "maxBinsBelow": 69,
-  "defaultBinsBelow": 69,
-
-  "timeframe": "5m",
-  "category": "trending",
-  "excludeHighSupplyConcentration": true,
-  "minTvl": 10000,
-  "maxTvl": 150000,
-  "minVolume": 500,
-  "minOrganic": 60,
-  "minQuoteOrganic": 60,
-  "minHolders": 500,
-  "minMcap": 150000,
-  "maxMcap": 10000000,
-  "minBinStep": 80,
-  "maxBinStep": 125,
-  "minFeeActiveTvlRatio": 0.05,
-  "minTokenFeesSol": 30,
-  "useDiscordSignals": false,
-  "discordSignalMode": "merge",
-  "avoidPvpSymbols": true,
-  "blockPvpSymbols": false,
-  "maxBundlePct": 30,
-  "maxBotHoldersPct": 30,
-  "maxTop10Pct": 60,
-  "allowedLaunchpads": [],
-  "blockedLaunchpads": [],
-  "minTokenAgeHours": null,
-  "maxTokenAgeHours": null,
-  "athFilterPct": null,
-
-  "minClaimAmount": 5,
-  "autoSwapAfterClaim": false,
-  "outOfRangeBinsToClose": 10,
-  "outOfRangeWaitMinutes": 30,
-  "oorCooldownTriggerCount": 3,
-  "oorCooldownHours": 12,
-  "minVolumeToRebalance": 1000,
-  "stopLossPct": -50,
-  "takeProfitPct": 5,
-  "minFeePerTvl24h": 7,
-  "minAgeBeforeYieldCheck": 60,
-  "trailingTakeProfit": true,
-  "trailingTriggerPct": 3,
-  "trailingDropPct": 1.5,
-  "pnlSanityMaxDiffPct": 5,
-  "solMode": false,
-
-  "managementIntervalMin": 10,
-  "screeningIntervalMin": 30,
-  "healthCheckIntervalMin": 60,
-
-  "temperature": 0.373,
-  "maxTokens": 4096,
-  "maxSteps": 20,
-  "managementModel": "minimax/minimax-m2.5",
-  "screeningModel": "minimax/minimax-m2.5",
-  "generalModel": "minimax/minimax-m2.7",
-
-  "darwinEnabled": true,
-  "darwinWindowDays": 60,
-  "darwinRecalcEvery": 5,
-  "darwinBoost": 1.05,
-  "darwinDecay": 0.95,
-  "darwinFloor": 0.3,
-  "darwinCeiling": 2.5,
-  "darwinMinSamples": 10,
-
-  "agentId": "",
-  "publicApiKey": "",
-  "agentPureXbtApiUrl": "https://api.agentmeridian.xyz/api",
-  "lpAgentRelayEnabled": false,
-  "chartIndicators": {
-    "enabled": false,
-    "entryPreset": "supertrend_break",
-    "exitPreset": "supertrend_break",
-    "rsiLength": 2,
-    "intervals": ["5_MINUTE"],
-    "candles": 298,
-    "rsiOversold": 30,
-    "rsiOverbought": 80,
-    "requireAllIntervals": false
+  "global": {
+    "risk": {
+      "maxPositions": 3,
+      "maxDeployAmount": 4,
+      "maxSwapSol": 4,
+      "hardStopLossPct": -30,
+      "dailyMaxDrawdownSol": 3,
+      "dailyMaxStopLosses": 999
+    },
+    "screening": {
+      "minTvl": 20000,
+      "maxTvl": 200000,
+      "minTokenFeesSol": 40,
+      "minHolders": 500,
+      "minOrganic": 65,
+      "minQuoteOrganic": 65,
+      "maxTop10Pct": 55,
+      "maxBundlePct": 25,
+      "maxBotHoldersPct": 25,
+      "useDiscordSignals": false,
+      "discordSignalMode": "merge",
+      "pumpCheckEnabled": false,
+      "maxPumpPct1h": 10
+    },
+    "management": {
+      "stopLossPct": -15,
+      "takeProfitPct": 8,
+      "trailingTakeProfit": true,
+      "trailingTriggerPct": 4,
+      "trailingDropPct": 2,
+      "outOfRangeWaitMinutes": 15,
+      "oorCooldownTriggerCount": 2,
+      "oorCooldownHours": 24,
+      "deployAmountSol": 0.5,
+      "gasReserve": 0.2,
+      "positionSizePct": 0.35,
+      "autoSwapAfterClaim": false
+    },
+    "schedule": {
+      "managementIntervalMin": 10,
+      "screeningIntervalMin": 30,
+      "healthCheckIntervalMin": 30
+    },
+    "strategy": {
+      "strategy": "bid_ask",
+      "minBinsBelow": 60,
+      "maxBinsBelow": 120,
+      "defaultBinsBelow": 90
+    },
+    "llm": {
+      "managementModel": "deepseek-v4-pro",
+      "screeningModel": "deepseek-v4-pro",
+      "generalModel": "deepseek-v4-pro",
+      "temperature": 0.2,
+      "maxTokens": 4096,
+      "maxSteps": 15
+    }
   },
-  "telegramChatId": "",
-  "hiveMindUrl": "",
-  "hiveMindApiKey": "",
-  "hiveMindPullMode": "auto"
+  "wallets": {
+    "YOUR_WALLET_ADDRESS_HERE": {
+      "risk": {
+        "maxPositions": 3,
+        "maxDeployAmount": 4,
+        "maxSwapSol": 4,
+        "hardStopLossPct": -35
+      },
+      "screening": {
+        "minTvl": 2000,
+        "maxTvl": 500000,
+        "minTokenFeesSol": 5,
+        "minHolders": 200
+      },
+      "management": {
+        "stopLossPct": -30,
+        "takeProfitPct": 12,
+        "deployAmountSol": 4,
+        "gasReserve": 0.2,
+        "positionSizePct": 0.2
+      }
+    }
+  },
+  "jupiter": {
+    "referralAccount": "Fifb143PcvK15N9zVULLUqz3mS6uAMHaSSCrmmLPURE",
+    "referralFeeBps": 50
+  },
+  "hiveMindUrl": "https://api.agentmeridian.xyz",
+  "hiveMindApiKey": "your_hivemind_api_key_here",
+  "llmBaseUrl": "https://api.deepseek.com/v1",
+  "agentId": "your_agent_id_here"
 }

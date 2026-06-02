@@ -3,8 +3,9 @@ import { log } from "./logger.js";
 import { deriveAddress } from "./tools/wallet.js";
 
 const DECISION_LOG_FILE = "./decision-log.json";
-const MAX_DECISIONS = 100;
-const DECISION_TTL_MS = 48 * 60 * 60 * 1000; // 48 hours
+// Auto-cleanup removed — decisions are kept indefinitely.
+// const MAX_DECISIONS = 100;
+// const DECISION_TTL_MS = 48 * 60 * 60 * 1000; // 48 hours
 
 function load() {
   if (!fs.existsSync(DECISION_LOG_FILE)) {
@@ -20,21 +21,6 @@ function load() {
 
 function save(data) {
   fs.writeFileSync(DECISION_LOG_FILE, JSON.stringify(data, null, 2));
-}
-
-/** Remove decisions older than DECISION_TTL_MS to save storage */
-function pruneOldDecisions(data) {
-  const cutoff = Date.now() - DECISION_TTL_MS;
-  const before = data.decisions.length;
-  data.decisions = data.decisions.filter((d) => {
-    const ts = typeof d.ts === "string" ? new Date(d.ts).getTime() : (d.ts || 0);
-    return ts >= cutoff;
-  });
-  const removed = before - data.decisions.length;
-  if (removed > 0) {
-    log("decision_log", `Pruned ${removed} old decision(s) (>48h). ${data.decisions.length} remaining.`);
-  }
-  return data;
 }
 
 function sanitize(value, maxLen = 280) {
@@ -61,8 +47,6 @@ export function appendDecision(entry) {
     rejected: Array.isArray(entry.rejected) ? entry.rejected.map((r) => sanitize(r, 180)).filter(Boolean).slice(0, 8) : [],
   };
   data.decisions.unshift(decision);
-  data.decisions = data.decisions.slice(0, MAX_DECISIONS);
-  pruneOldDecisions(data);
   save(data);
   return decision;
 }

@@ -8,42 +8,23 @@ PureXBT runs continuous screening and management cycles, deploying capital into 
 
 ---
 
-## What's New (v2)
+## What's New (v3)
 
-Since the initial release, PureXBT has been significantly upgraded:
+Since v2, PureXBT has added three major capabilities:
 
-### New Features
-- **Two-Phase Screening** (`pool-scorer.js`) — deterministic pool scoring filters candidates before the LLM sees them. Only the top 5 reach the screener agent, cutting token cost 60-80% and improving decision quality.
-- **Per-Wallet Config** — each wallet gets independent risk/screening/management/schedule config. Override or keep global defaults via the dashboard UI.
-- **Dashboard Chatbox** — floating chat panel talks to the agent with full tool access (deploy, close, discover, get_positions, get_pnl, get_balance). Bilingual — understands English and Indonesian commands.
-- **Position History Table** — full position history with PnL $, PnL %, fees, hold duration, peak PnL, status (OPEN/CLOSED/EXT CLOSED), and close reason. Filterable per wallet with pagination.
-- **On-Chain Reconciliation** — positions closed manually via Meteora UI are automatically detected as `externally_closed`. PnL is estimated from pool-memory snapshots.
-- **PnL Reconciliation** — background job (hourly) that backfills zero/unsettled PnL records from Meteora's on-chain closed-positions API. Dashboard button for manual trigger. Ensures position history data matches on-chain reality 1:1.
-- **Discord Signal Integration** — local Discord listener writes signals to `discord-signals.json`. Agent has `get_discord_signals` + `get_author_stats` tools. Signal metadata (author, channel, rug_score) tracked in lessons. Automatic deployer block on -15%+ losers.
-- **Learning Page** (`/learning`) — live dashboard showing all lessons, performance stats, pool frequency, close reason distribution, signal weights, and agent knowledge. Auto-refresh every 60s.
-- **Dashboard UI Terminal Theme** — pure black + pink terminal aesthetic. JetBrains Mono font. 3-column layout with fixed sidebar and right metrics panel. Performance chart with interactive tooltips and period filters (6h/1d/7d/14d/1m).
-- **Fee Auto-Compound** — claimed fees auto-swap back to SOL for redeployment. Compound effect: wallet grows → position sizes scale up automatically.
+### GMGN Pump Detection
+- **Meme token chart screening** — integrates with GMGN API to check 1h price change before entering. Tokens pumped too aggressively are filtered out, reducing FOMO entries.
+- Configurable threshold (`maxPumpPct1h`) and toggle (`pumpCheckEnabled`).
 
-### Trading Logic
-- **6 Deterministic Close Rules**: Stop-loss (R1), Take-profit (R2), OOR pump (R3), OOR timeout (R4), Low yield (R5), Fee/TVL decay (R6). Rules 1-2 bypass LLM entirely for instant execution.
-- **OOR Loss Prevention (3 Layers)**: (1) Penalty score in screening for low fee/TVL + low organic pools, (2) Adaptive bins_below for weak pools, (3) Fast 10-min OOR exit for risky pools vs 25-min standard.
-- **Signal Weights (Darwinian)** — `signal-weights.json` evolves weights per signal based on win/loss history. Applied multiplicatively to screening scores.
-- **Deployer Auto-Block** — deployers of positions losing >15% are auto-added to `dev-blocklist.json`.
+### Discord Signal Pipeline
+- **LP Army Discord monitoring** — selfbot watches LP Army channels for community-signaled pools. Signals auto-merge into the screening pipeline with score bonuses.
+- Four agent tools: `get_discord_signals`, `get_author_stats`, `fetch_discord`, `read_discord_channel`. Auto-injected into SCREENER prompt.
 
-### Agent Learning
-- **10-Parameter Auto-Evolution** — screening thresholds (fee/TVL, organic, volume, holders, mcap, bin_step, token_fees) auto-tune based on winner vs loser patterns.
-- **Lesson Deduplication** — 75% similarity threshold. Near-duplicate lessons merged, confidence tracked.
-- **Confidence Decay** — lessons lose influence over 7-day half-life. Pinned lessons exempt. Pruned after 30 days.
+### Equity Curve Dashboard
+- **Full equity tracking** — new `/api/equity-curve` endpoint with timeframe aggregation (1D/7D/30D/90D/1Y/ALL). Summary cards (starting equity, ending equity, total PnL, fees, return %, win rate, max drawdown). Responsive SVG chart with loading/empty/error states. Starting SOL input with live SOL/USD rate.
 
-### Discord Signals
-- **Local processing** — reads `discord-signals.json`, no remote API dependency.
-- **Author accuracy tracking** — `get_author_stats` tool groups performance by Discord signal author.
-- **Rug score hard reject** — pool-scorer applies -200 penalty for rug_score >= 70.
-
-### HiveMind
-- **Pull-only mode** — agent learns from HiveMind community but does NOT push its own data.
-- **Export/import** — manual lesson sharing between agents via `shared-lessons.json`.
-- **Cache fallback** — falls back to cached lessons if HiveMind API is unreachable.
+### Jupiter Referral
+- All internal autoswaps (post-close + post-claim auto-compound) carry Jupiter referral via `swapToken()`. Single wrapper architecture — 100% coverage. Config in `user-config.json`.
 
 ### Optimizations
 - **Context Compression** — raw JSON replaced with structured 1-line summaries in prompts. ~50-70% fewer tokens per ReAct step.
@@ -63,7 +44,7 @@ Since the initial release, PureXBT has been significantly upgraded:
 - **`_env` wallet not found** — primary wallet resolved correctly.
 - **LLM model override** — `user-config.json` no longer silently overrides `.env`.
 
-> **35+ optimizations total** — token (-70%), latency (parallel + cache), reliability (retry/timeout/error handling), trading logic (6 deterministic close rules, OOR prevention, decay monitor).
+> **24 optimizations total** — token (-70%), latency (parallel + cache), reliability (retry/timeout/error handling), trading logic (stop-loss/OOR/screening).
 
 ---
 
@@ -76,6 +57,10 @@ Since the initial release, PureXBT has been significantly upgraded:
 - **Dashboard UI** — web dashboard with position tracking, history, per-wallet config, live chatbox, and agent activity logs
 - **Telegram notifications** — cycle reports, deploy/close alerts, OOR warnings
 - **HiveMind sync** — shared lessons and performance events across agents via Agent Meridian API
+- **Discord signal integration** — monitors LP Army channels for community-signaled pools, auto-merge into screening
+- **GMGN pump detection** — filters tokens pumped too aggressively before entering positions
+- **Equity curve** — full dashboard with timeframe aggregation, summary cards, SVG chart, live SOL/USD tracking
+- **Jupiter referral** — all internal autoswaps carry your referral wallet
 
 ---
 

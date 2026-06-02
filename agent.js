@@ -1,11 +1,17 @@
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import OpenAI from "openai";
 import { jsonrepair } from "jsonrepair";
 import { buildSystemPrompt } from "./prompt.js";
 import { executeTool } from "./tools/executor.js";
 import { tools } from "./tools/definitions.js";
 
-const MANAGER_TOOLS  = new Set(["close_position", "claim_fees", "swap_token", "get_position_pnl", "get_my_positions", "get_wallet_balance", "get_wallet_positions"]);
-const SCREENER_TOOLS = new Set(["deploy_position", "get_active_bin", "get_token_holders", "get_wallet_balance", "get_my_positions", "get_wallet_positions", "get_discord_signals", "get_author_stats"]);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const MANAGER_TOOLS  = new Set(["close_position", "claim_fees", "swap_token", "get_position_pnl", "get_my_positions", "get_wallet_balance", "get_wallet_positions", "list_lessons", "manage_lesson", "delete_lesson"]);
+const SCREENER_TOOLS = new Set(["deploy_position", "get_active_bin", "get_token_holders", "get_wallet_balance", "get_my_positions", "get_wallet_positions", "get_discord_signals", "get_author_stats", "fetch_discord", "read_discord_channel"]);
 const GENERAL_INTENT_ONLY_TOOLS = new Set([
   "self_update",
   "update_config",
@@ -20,6 +26,8 @@ const GENERAL_INTENT_ONLY_TOOLS = new Set([
   "add_lesson",
   "pin_lesson",
   "unpin_lesson",
+  "delete_lesson",
+  "manage_lesson",
   "clear_lessons",
   "add_strategy",
   "remove_strategy",
@@ -54,7 +62,7 @@ const INTENT_TOOLS = {
   smartwallet: new Set(["add_smart_wallet", "remove_smart_wallet", "list_smart_wallets", "check_smart_wallets_on_pool"]),
   study:       new Set(["study_top_lpers", "get_top_lpers", "get_pool_detail", "search_pools", "get_token_info", "discover_pools", "add_smart_wallet", "list_smart_wallets"]),
   performance: new Set(["get_performance_history", "get_my_positions", "get_position_pnl"]),
-  lessons:     new Set(["add_lesson", "pin_lesson", "unpin_lesson", "list_lessons", "clear_lessons"]),
+  lessons:     new Set(["add_lesson", "pin_lesson", "unpin_lesson", "list_lessons", "clear_lessons", "delete_lesson", "manage_lesson"]),
   discord:     new Set(["get_discord_signals", "get_author_stats", "add_lesson"]),
 };
 
@@ -179,7 +187,24 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       if (config.darwin?.enabled) weightsSummary = getWeightsSummary();
     } catch { /* signal-weights not critical */ }
   }
-  const systemPrompt = buildSystemPrompt(agentType, portfolio, positions, stateSummary, lessons, perfSummary, weightsSummary, decisionSummary, patternSummary) || "";
+  let discordSignalsSummary = null;
+  if (agentType === "SCREENER") {
+    try {
+      const raw = fs.readFileSync(path.join(__dirname, "discord-signals.json"), "utf-8");
+      const data = JSON.parse(raw);
+      const signals = Array.isArray(data) ? data : (data.signals || []);
+      const recent = signals.filter(s => {
+        if (!s.queued_at) return false;
+        return (Date.now() - new Date(s.queued_at).getTime()) < 24 * 3600000;
+      });
+      if (recent.length > 0) {
+        const symbols = [...new Set(recent.map(s => s.base_symbol).filter(Boolean))];
+        const channels = [...new Set(recent.map(s => s.discord_channel).filter(Boolean))];
+        discordSignalsSummary = `DISCORD LP ARMY SIGNALS (last 24h): ${recent.length} signals across ${channels.length} channels. Tracked tokens: ${symbols.slice(0, 20).join(", ")}${symbols.length > 20 ? " (+" + (symbols.length - 20) + " more)" : ""}. Use fetch_discord for details.`;
+      }
+    } catch { /* discord signals optional */ }
+  }
+  const systemPrompt = buildSystemPrompt(agentType, portfolio, positions, stateSummary, lessons, perfSummary, weightsSummary, decisionSummary, patternSummary, discordSignalsSummary) || "";
 
   let providerMode = "system";
   let messages = buildMessages(systemPrompt, sessionHistory, goal, providerMode);

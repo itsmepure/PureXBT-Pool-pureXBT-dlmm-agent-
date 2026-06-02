@@ -1,3 +1,6 @@
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { config } from "../config.js";
 import { isBlacklisted } from "../token-blacklist.js";
 import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
@@ -6,6 +9,10 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { loadWeights } from "../signal-weights.js";
+import { pumpCheckFilter } from "./gmgn.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -207,8 +214,6 @@ function getRawPoolScreeningRejectReason(pool, s) {
 
 async function fetchDiscordSignalCandidates() {
   // Read from local discord-signals.json (written by discord-listener PM2 process)
-  const fs = require("fs");
-  const path = require("path");
   const signalsPath = path.join(__dirname, "..", "discord-signals.json");
   let signals = [];
   try {
@@ -237,8 +242,8 @@ async function fetchDiscordSignalCandidates() {
         existing.last_seen_at = sig.queued_at;
       }
       // Track all authors for this pool
-      if (sig.discord_author && !existing.authors.includes(sig.discord_author)) {
-        existing.authors.push(sig.discord_author);
+      if (sig.discord_author && !existing._discord_meta.authors.includes(sig.discord_author)) {
+        existing._discord_meta.authors.push(sig.discord_author);
       }
     } else {
       byPool.set(sig.pool_address, {
@@ -826,6 +831,11 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     });
     eligible.splice(0, eligible.length, ...filtered);
     if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via OKX creator check`);
+  }
+
+  // GMGN pump check — reject tokens that pumped >maxPumpPct1h% in the last hour
+  if (config.screening.pumpCheckEnabled && eligible.length > 0) {
+    await pumpCheckFilter(eligible, filteredOut, config.screening.maxPumpPct1h);
   }
 
   if (config.indicators.enabled && eligible.length > 0) {
