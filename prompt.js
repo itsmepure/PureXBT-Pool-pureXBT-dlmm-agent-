@@ -51,7 +51,7 @@ function compressConfig() {
   return `maxPositions=${config.risk.maxPositions}, deployAmount=${m.deployAmountSol} SOL, stopLoss=${m.stopLossPct}%, minTvl=${s.minTvl}, minOrganic=${s.minOrganic}, screenInterval=${sch.screeningIntervalMin}min, mgmtInterval=${sch.managementIntervalMin}min`;
 }
 
-export function buildSystemPrompt(agentType, portfolio, positions, stateSummary = null, lessons = null, perfSummary = null, weightsSummary = null, decisionSummary = null, patternSummary = null, discordSignalsSummary = null) {
+export function buildSystemPrompt(agentType, portfolio, positions, stateSummary = null, lessons = null, perfSummary = null, weightsSummary = null, decisionSummary = null, patternSummary = null, discordSignalsSummary = null, trendingDiscoverySummary = null) {
   const s = config.screening;
 
   // MANAGER gets a leaner prompt — positions are pre-loaded in the goal, not repeated here
@@ -186,7 +186,7 @@ ${weightsSummary ? `${weightsSummary}\nPrioritize candidates whose strongest att
 ═══════════════════════════════════════════
 ${patternSummary}
 
-` : ""}${discordSignalsSummary ? `DISCORD LP ARMY INTELLIGENCE:\n${discordSignalsSummary}\n` : ""}Timestamp: ${new Date().toISOString()}
+` : ""}${discordSignalsSummary ? `DISCORD LP ARMY INTELLIGENCE:\n${discordSignalsSummary}\n` : ""}${trendingDiscoverySummary ? `\n${trendingDiscoverySummary}\n\n` : ""}Timestamp: ${new Date().toISOString()}
 `;
   } else if (agentType === "MANAGER") {
     basePrompt += `

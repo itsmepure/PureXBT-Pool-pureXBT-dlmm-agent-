@@ -125,10 +125,11 @@ const DEFAULT_MODEL = process.env.LLM_MODEL || "openrouter/healer-alpha";
 const MUTATING_TOOL_INTENTS = /\b(deploy|open position|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|add smart wallet|remove smart wallet|add wallet|remove wallet|pin|unpin|clear lesson|add lesson|set active strategy|remove strategy|add strategy|set |change |update |self.?update|pull latest|git pull|update yourself|buka posisi|tutup|keluar|tarik|cabut|hentikan|klaim|tukar|jual|beli|konversi|blokir|pasang|daftar hitam|tambah wallet|hapus wallet)\b/i;
 const LIVE_DATA_TOOL_INTENTS = /\b(balance|wallet|position|portfolio|pnl|yield|range|show positions|open positions|screen|candidate|find pool|search|research|analyze|check pool|token holders|narrative|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|list smart wallets|list blacklist|list blocked deployers|list lessons|saldo|cek (?:saldo|balance|wallet|sol)|posisi terbuka|posisi saat ini|posisi|portofolio|cari pool|scan|skrining|performa|kinerja|laporan|pelajaran|strategi|riwayat)\b/i;
 const CONFIG_READ_ONLY_INTENTS = /\b(check|show|what(?:'s| is)?|review|inspect|see)\b.*\b(config|settings?|thresholds?)\b/i;
-const DECISION_EXPLANATION_INTENTS = /\b(why did you|why'd you|why was (?:this|that|it)|what made you|what was the reason|why no deploy|why didn't you deploy|why did you close|why did you deploy|why did you skip)\b/i;
+const DECISION_EXPLANATION_INTENTS = /\b(why did you|why'd you|why was (?:this|that|it)|what made you|what was the reason|why no deploy|why didn't you deploy|why did you close|why did you deploy|why did you skip|system briefing|briefing)\b/i;
 
 function shouldRequireRealToolUse(goal, agentType, interactive = false) {
   if (agentType === "MANAGER") return false;
+  if (agentType === "SCREENER") return false;
   if (DECISION_EXPLANATION_INTENTS.test(goal)) return false;
   if (CONFIG_READ_ONLY_INTENTS.test(goal)) return false;
   if (MUTATING_TOOL_INTENTS.test(goal)) return true;
@@ -204,7 +205,11 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       }
     } catch { /* discord signals optional */ }
   }
-  const systemPrompt = buildSystemPrompt(agentType, portfolio, positions, stateSummary, lessons, perfSummary, weightsSummary, decisionSummary, patternSummary, discordSignalsSummary) || "";
+  let trendingDiscoverySummary = null;
+  if (agentType === "SCREENER" && config.screening?.trendingDiscoveryEnabled) {
+    trendingDiscoverySummary = `GMGN TRENDING DISCOVERY: ACTIVE. GMGN /market/rank pools are cross-referenced against Meteora DLMM and merged into the candidate pool. Tokens that appear in GMGN trending have organic market demand signals — they are NOT blind pumps. When evaluating candidates, note if a pool came from GMGN trending (gmgn_trending:true in metadata) — these carry external validation of market interest. Do NOT auto-reject tokens trending on GMGN; instead verify with standard checks (volatility, fees, bin step).`;
+  }
+  const systemPrompt = buildSystemPrompt(agentType, portfolio, positions, stateSummary, lessons, perfSummary, weightsSummary, decisionSummary, patternSummary, discordSignalsSummary, trendingDiscoverySummary) || "";
 
   let providerMode = "system";
   let messages = buildMessages(systemPrompt, sessionHistory, goal, providerMode);
@@ -226,7 +231,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       const activeModel = model || process.env.LLM_MODEL || "openrouter/healer-alpha";
 
       // Retry up to 3 times on transient provider errors (502, 503, 529)
-      const FALLBACK_MODEL = "stepfun/step-3.5-flash:free";
+      const FALLBACK_MODEL = "MiniMax-M3";
       let response;
       let usedModel = activeModel;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes

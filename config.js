@@ -131,7 +131,13 @@ export const config = {
     maxTokenAgeHours:  screening.maxTokenAgeHours   ?? null,
     athFilterPct:      screening.athFilterPct       ?? null,
     pumpCheckEnabled:  screening.pumpCheckEnabled    ?? false,
-    maxPumpPct1h:      screening.maxPumpPct1h        ?? 10,
+    maxPumpPct1h:       screening.maxPumpPct1h        ?? 10,
+    athSoftCapEnabled:  screening.athSoftCapEnabled   ?? true,
+    athSoftCapPct:      screening.athSoftCapPct       ?? 15,
+    athSoftCapMaxScore: screening.athSoftCapMaxScore  ?? 40,
+    securityCheckEnabled: screening.securityCheckEnabled ?? false,
+    holderCheckEnabled:   screening.holderCheckEnabled   ?? false,
+    trendingDiscoveryEnabled: screening.trendingDiscoveryEnabled ?? false,
   },
 
   // ─── Position Management ────────────────

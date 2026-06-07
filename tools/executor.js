@@ -1,4 +1,4 @@
-import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
+import { discoverPools, getPoolDetail, getTopCandidates, meteoraFetchWithCache } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -76,9 +76,8 @@ async function fetchFreshPoolDetail(poolAddress, timeframe = config.screening.ti
   const encodedTimeframe = encodeURIComponent(timeframe);
   const filter = encodeURIComponent(`pool_address=${poolAddress}`);
   const url = `${POOL_DISCOVERY_BASE}/pools?page_size=1&filter_by=${filter}&timeframe=${encodedTimeframe}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Pool Discovery API error: ${res.status} ${res.statusText}`);
-  const data = await res.json();
+  // Use 120s cache + retry/backoff via meteoraFetchWithCache
+  const data = await meteoraFetchWithCache(url);
   return (data?.data || [])[0] ?? null;
 }
 

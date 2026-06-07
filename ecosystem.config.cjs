@@ -16,6 +16,7 @@ module.exports = {
       min_uptime: "10s",
       env: {
         NODE_ENV: "production",
+        LLM_MODEL: "deepseek-v4-pro",
         WALLET_ID: "Fifb143PcvK15N9zVULLUqz3mS6uAMHaSSCrmmLPURE",
       },
     },

@@ -8,23 +8,30 @@ PureXBT runs continuous screening and management cycles, deploying capital into 
 
 ---
 
-## What's New (v3)
+## What's New (v3.1)
 
-Since v2, PureXBT has added three major capabilities:
+> **2026-06-06** — Config tuning, swap referral cleanup, GMGN integration hardening.
 
-### GMGN Pump Detection
-- **Meme token chart screening** — integrates with GMGN API to check 1h price change before entering. Tokens pumped too aggressively are filtered out, reducing FOMO entries.
-- Configurable threshold (`maxPumpPct1h`) and toggle (`pumpCheckEnabled`).
+### v3.1 Changes
+- **Configurable Entry Size** — `deployAmountSol` (floor), `maxDeployAmount` (ceiling), `positionSizePct` (wallet %). Formula: `clamp(wallet × pct, floor, ceil)`. Scales position size with wallet growth.
+- **Jupiter Swap V2** — auto-swap token → SOL on position close and fee claim. Uses Jupiter Ultra API. Referral is optional — set `jupiter.referralAccount` and `referralFeeBps` in config, or leave empty to skip.
+- **GMGN Integration** — trending discovery, pump detection, security/rug checks, smart money enrichment. API key via `GMGN_API_KEY` env var (not hardcoded).
+- **Discord Signal Tools** — `fetch_discord`, `read_discord_channel`, `get_discord_signals`, `get_author_stats` for Discord-based pool discovery.
+- **Smart Wallets** — KOL/alpha wallet tracking with pool cross-reference. Dashboard UI for adding/managing tracked wallets.
+- **OOR Loss Prevention** — 3-layer system: scoring penalties, adaptive bin thresholds, fast OOR exit based on fee/TVL and organic score.
+- **Fee Auto-Compound** — auto-swap claimed fees to SOL for natural compounding.
 
-### Discord Signal Pipeline
-- **LP Army Discord monitoring** — selfbot watches LP Army channels for community-signaled pools. Signals auto-merge into the screening pipeline with score bonuses.
-- Four agent tools: `get_discord_signals`, `get_author_stats`, `fetch_discord`, `read_discord_channel`. Auto-injected into SCREENER prompt.
+### v2 Features
 
-### Equity Curve Dashboard
-- **Full equity tracking** — new `/api/equity-curve` endpoint with timeframe aggregation (1D/7D/30D/90D/1Y/ALL). Summary cards (starting equity, ending equity, total PnL, fees, return %, win rate, max drawdown). Responsive SVG chart with loading/empty/error states. Starting SOL input with live SOL/USD rate.
+Since the initial release, PureXBT has been significantly upgraded:
 
-### Jupiter Referral
-- All internal autoswaps (post-close + post-claim auto-compound) carry Jupiter referral via `swapToken()`. Single wrapper architecture — 100% coverage. Config in `user-config.json`.
+### New Features
+- **Two-Phase Screening** (`pool-scorer.js`) — deterministic pool scoring filters candidates before the LLM sees them. Only the top 5 reach the screener agent, cutting token cost 60-80% and improving decision quality.
+- **Per-Wallet Config** — each wallet gets independent risk/screening/management/schedule config. Override or keep global defaults via the dashboard UI.
+- **Dashboard Chatbox** — floating chat panel talks to the agent with full tool access (deploy, close, discover, get_positions, get_pnl, get_balance). Bilingual — understands English and Indonesian commands.
+- **Position History Table** — full position history with PnL $, PnL %, fees, hold duration, peak PnL, status (OPEN/CLOSED/EXT CLOSED), and close reason. Filterable per wallet with pagination.
+- **On-Chain Reconciliation** — positions closed manually via Meteora UI are automatically detected as `externally_closed`. PnL is estimated from pool-memory snapshots.
+- **Feedback Injection** — pattern-aware decision summary (win rate, cumulative PnL, loss patterns) injected into the SCREENER system prompt.
 
 ### Optimizations
 - **Context Compression** — raw JSON replaced with structured 1-line summaries in prompts. ~50-70% fewer tokens per ReAct step.
@@ -57,10 +64,6 @@ Since v2, PureXBT has added three major capabilities:
 - **Dashboard UI** — web dashboard with position tracking, history, per-wallet config, live chatbox, and agent activity logs
 - **Telegram notifications** — cycle reports, deploy/close alerts, OOR warnings
 - **HiveMind sync** — shared lessons and performance events across agents via Agent Meridian API
-- **Discord signal integration** — monitors LP Army channels for community-signaled pools, auto-merge into screening
-- **GMGN pump detection** — filters tokens pumped too aggressively before entering positions
-- **Equity curve** — full dashboard with timeframe aggregation, summary cards, SVG chart, live SOL/USD tracking
-- **Jupiter referral** — all internal autoswaps carry your referral wallet
 
 ---
 
@@ -280,8 +283,9 @@ tools/
   executor.js       Tool dispatch + safety checks
   dlmm.js           Meteora DLMM SDK wrapper
   screening.js      Pool discovery + parallel fetch
-  wallet.js         SOL/token balances (Helius) + Jupiter swap
+  wallet.js         SOL/token balances (Helius) + Jupiter Swap V2
   token.js          Token info, holders, narrative
+  gmgn.js           GMGN API — trending discovery, pump detection, security checks
   study.js          Top LPer study via LPAgent API
 ```
 

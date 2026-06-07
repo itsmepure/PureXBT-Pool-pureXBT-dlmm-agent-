@@ -1881,6 +1881,70 @@ async function handlePostWalletConfig(req, res) {
   jsonReply(res, 200, { ok: true, config: body.config });
 }
 
+// ─── Smart Wallets API ──────────────────────────────────────────
+
+async function handleSmartWallets(req, res) {
+  try {
+    const { addSmartWallet, removeSmartWallet, listSmartWallets } = await import("./smart-wallets.js");
+    if (req.method === "GET") {
+      const result = listSmartWallets();
+      return jsonReply(res, 200, { ok: true, ...result });
+    }
+    if (req.method === "POST") {
+      const body = await parseBody(req);
+      const { name, address, category, type } = body;
+      if (!name || !address) return jsonReply(res, 400, { ok: false, error: "name and address are required" });
+      const result = addSmartWallet({ name, address, category: category || "alpha", type: type || "lp" });
+      if (!result.success) return jsonReply(res, 409, { ok: false, error: result.error });
+      return jsonReply(res, 201, { ok: true, wallet: result.wallet });
+    }
+    if (req.method === "PATCH") {
+      const body = await parseBody(req);
+      const { address, name, category, type } = body;
+      if (!address) return jsonReply(res, 400, { ok: false, error: "address is required" });
+      const { updateSmartWallet } = await import("./smart-wallets.js");
+      const result = updateSmartWallet({ address, name, category, type });
+      if (!result.success) return jsonReply(res, 404, { ok: false, error: result.error });
+      return jsonReply(res, 200, { ok: true, wallet: result.wallet });
+    }
+    if (req.method === "DELETE") {
+      const url = new URL(req.url, `http://localhost:${PORT}`);
+      const address = url.searchParams.get("address");
+      if (!address) return jsonReply(res, 400, { ok: false, error: "address query param is required" });
+      const result = removeSmartWallet({ address });
+      if (!result.success) return jsonReply(res, 404, { ok: false, error: result.error });
+      return jsonReply(res, 200, { ok: true, removed: result.removed });
+    }
+    jsonReply(res, 405, { ok: false, error: "Method not allowed" });
+  } catch (err) {
+    jsonReply(res, 500, { ok: false, error: err.message });
+  }
+}
+
+async function handleSmartWalletCheck(req, res) {
+  try {
+    const body = req.method === "POST" ? await parseBody(req) : {};
+    const url = new URL(req.url, `http://localhost:${PORT}`);
+    const poolAddress = body.pool_address || url.searchParams.get("pool_address");
+    if (!poolAddress) return jsonReply(res, 400, { ok: false, error: "pool_address is required" });
+    const { checkSmartWalletsOnPool } = await import("./smart-wallets.js");
+    const result = await checkSmartWalletsOnPool({ pool_address: poolAddress });
+    jsonReply(res, 200, { ok: true, ...result });
+  } catch (err) {
+    jsonReply(res, 500, { ok: false, error: err.message });
+  }
+}
+
+async function handleSmartWalletPools(req, res) {
+  try {
+    const { getAllTrackedPools } = await import("./smart-wallets.js");
+    const pools = await getAllTrackedPools();
+    jsonReply(res, 200, { ok: true, total: pools.length, pools });
+  } catch (err) {
+    jsonReply(res, 500, { ok: false, error: err.message });
+  }
+}
+
 // ─── Learning API ────────────────────────────────────────────────
 
 async function handleLearning(req, res) {
@@ -1965,6 +2029,7 @@ const API_ROUTES = new Set([
   "/api/decisions", "/api/stats", "/api/history", "/api/logs",
   "/api/action", "/api/chat", "/api/chat/history", "/api/health", "/api/auth/preview",
     "/api/learning", "/api/learning/knowledge", "/api/reconcile",
+  "/api/smart-wallets", "/api/smart-wallets/check", "/api/smart-wallets/pools",
 ]);
 
 function createServer() {
@@ -2011,6 +2076,15 @@ function createServer() {
       }
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
       return res.end(fs.readFileSync(learningFile, "utf8"));
+    }
+    if (req.method === "GET" && p === "/smart-wallets" || p === "/smart-wallets.html") {
+      const swFile = path.join(__dirname, "smart-wallets.html");
+      if (!fs.existsSync(swFile)) {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        return res.end("smart-wallets.html not found on server");
+      }
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
+      return res.end(fs.readFileSync(swFile, "utf8"));
     }
     if (req.method === "GET" && p === "/banner.png") {
       if (!fs.existsSync(BANNER_FILE)) {
@@ -2068,6 +2142,11 @@ function createServer() {
     if (p === "/api/learning" && req.method === "GET") return handleLearning(req, res);
     if (p === "/api/learning/knowledge" && req.method === "GET") return handleLearningKnowledge(req, res);
 
+    // Smart Wallets API
+    if (p === "/api/smart-wallets") return handleSmartWallets(req, res);
+    if (p === "/api/smart-wallets/check") return handleSmartWalletCheck(req, res);
+    if (p === "/api/smart-wallets/pools") return handleSmartWalletPools(req, res);
+
     // PnL Reconciliation
     if (p === "/api/reconcile" && req.method === "POST") return handleReconcile(req, res);
 
@@ -2103,18 +2182,26 @@ export function startDashboard() {
   restoreAgentPid();
   _server = createServer();
   const HOST = process.env.DASHBOARD_HOST || "0.0.0.0";
-  _server.listen(PORT, HOST, () => {
-    log("dashboard", `Dashboard running on http://${HOST}:${PORT}`);
-    if (PASSWORD) log("dashboard", `Basic auth enabled (password set via DASHBOARD_PASSWORD)`);
-  });
   _server.on("error", (err) => {
-    log("dashboard_error", `Failed to start: ${err.message}`);
+    log("dashboard_error", `Failed to start on ${HOST}:${PORT} — ${err.message}`);
+    if (err.code === "EADDRINUSE") {
+      log("dashboard_error", `Port ${PORT} already in use. Another instance may be running. Exiting so PM2 can restart fresh.`);
+      setTimeout(() => process.exit(1), 500).unref?.();
+    }
     _server = null;
+  });
+  _server.listen({ port: PORT, host: HOST, exclusive: false }, () => {
+    const addr = _server.address();
+    log("dashboard", `Dashboard running on http://${addr?.address || HOST}:${addr?.port || PORT} (pid=${process.pid})`);
+    if (PASSWORD) log("dashboard", `Basic auth enabled (password set via DASHBOARD_PASSWORD)`);
   });
 }
 
 export function stopDashboard() {
   if (!_server) return;
+  if (typeof _server.closeAllConnections === "function") {
+    try { _server.closeAllConnections(); } catch {}
+  }
   _server.close();
   _server = null;
   log("dashboard", "Dashboard stopped");

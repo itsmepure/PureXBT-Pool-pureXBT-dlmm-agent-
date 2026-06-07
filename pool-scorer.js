@@ -9,7 +9,8 @@
  * or fetches enrichment data (30+ tool calls → 3-5 final validation calls).
  */
 
-import { getTopCandidates } from "./tools/screening.js";
+import { getTopCandidates, computeAthSoftCap } from "./tools/screening.js";
+import { config } from "./config.js";
 import { getPoolMemory, recallForPool } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { log } from "./logger.js";
@@ -207,8 +208,20 @@ export async function prescreenPools({ limit = 5 } = {}) {
   const enriched = await Promise.all(toEnrich.map(enrichCandidate));
 
   // Step 5: apply enrichment adjustments
+  const screeningCfg = config?.screening || {};
   for (const c of enriched) {
     c._finalScore = c._rawScore + c._memAdjust + c._walletBonus;
+
+    // ATH soft-cap: pre-LLM defense-in-depth (bonuses cannot override cap)
+    const athDistance = c.price_vs_ath_pct != null ? Math.abs(c.price_vs_ath_pct) : null;
+    const athResult = computeAthSoftCap(c._finalScore, athDistance, screeningCfg);
+    if (athResult.capped) {
+      log("screening", `[ATH] Cap applied (pre-LLM): ${c.name || c.pool_address} ath=${athResult.athDistance.toFixed(1)}% score=${c._finalScore.toFixed(0)}->${athResult.score}`);
+      c._finalScore = athResult.score;
+      // Also add note for candidateBlock enrichment
+      c._athCapped = true;
+      c._athDistancePct = athResult.athDistance;
+    }
   }
 
   // Step 6: sort by final score, take top N

@@ -35,7 +35,7 @@ import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
-import { startDashboard } from "./dashboard.js";
+import { startDashboard, stopDashboard } from "./dashboard.js";
 
 const entrypointPath = process.env.pm_exec_path || process.argv[1];
 const isMain = entrypointPath
@@ -48,13 +48,37 @@ let _dailyStopDate = "";
 
 if (isMain) {
   log("startup", "DLMM LP Agent starting...");
+  log("startup", `PID: ${process.pid}  |  Port: ${process.env.DASHBOARD_PORT || "3000"}  |  Uptime: ${new Date().toISOString()}`);
   log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
   log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
-  ensureAgentId();
+  try {
+    ensureAgentId();
+  } catch (e) {
+    log("startup_error", `ensureAgentId failed: ${e.message}`);
+  }
   bootstrapHiveMind().catch((error) => log("hivemind_warn", `Bootstrap failed: ${error.message}`));
-  startHiveMindBackgroundSync();
-  startDashboard();
+  try {
+    startHiveMindBackgroundSync();
+  } catch (e) {
+    log("hivemind_warn", `startHiveMindBackgroundSync threw: ${e.message}`);
+  }
+  try {
+    startDashboard();
+  } catch (e) {
+    log("dashboard_error", `startDashboard threw: ${e.message}`);
+  }
 }
+
+// ─── Top-level safety net: log + exit gracefully on unhandled errors ───
+process.on("uncaughtException", (err) => {
+  try { log("uncaught", `[FATAL] ${err.message}\n${err.stack || ""}`); } catch {}
+  setTimeout(() => process.exit(1), 1000).unref?.();
+});
+
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? `${reason.message}\n${reason.stack || ""}` : String(reason);
+  try { log("unhandled_rejection", `[WARN] ${msg}`); } catch {}
+});
 
 const TP_PCT = config.management.takeProfitPct;
 const DEPLOY = config.management.deployAmountSol;
@@ -395,6 +419,7 @@ After executing, write a brief one-line result per position.
     mgmtReport = `Management cycle failed: ${error.message}`;
   } finally {
     _managementBusy = false;
+    drainTelegramQueue().catch(() => {});
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
@@ -427,6 +452,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
   if (_dailyStopCount >= maxDailyStops) {
     log("cron", `Screening skipped — daily stop-loss limit reached (${_dailyStopCount}/${maxDailyStops})`);
     _screeningBusy = false;
+    drainTelegramQueue().catch(() => {});
     return `Daily stop-loss limit reached (${_dailyStopCount}). No new deploys until tomorrow.`;
   }
 
@@ -446,6 +472,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         reason: `Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`,
       });
       _screeningBusy = false;
+      drainTelegramQueue().catch(() => {});
       return screenReport;
     }
     const minRequired = config.management.deployAmountSol + config.management.gasReserve;
@@ -460,12 +487,14 @@ export async function runScreeningCycle({ silent = false } = {}) {
         reason: `Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`,
       });
       _screeningBusy = false;
+      drainTelegramQueue().catch(() => {});
       return screenReport;
     }
   } catch (e) {
     log("cron_error", `Screening pre-check failed: ${e.message}`);
     screenReport = `Screening pre-check failed: ${e.message}`;
     _screeningBusy = false;
+    drainTelegramQueue().catch(() => {});
     return screenReport;
   }
   if (!silent && telegramEnabled()) {
@@ -660,6 +689,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
         activeBin != null ? `  active_bin: ${activeBin}` : null,
         priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
+        pool.price_vs_ath_pct != null ? `  ath_distance: ${Math.abs(pool.price_vs_ath_pct)}% from ATH${pool._athCapped ? " [SOFT-CAPPED]" : ""}` : null,
         n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
         mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
       ].filter(Boolean).join("\n");
@@ -800,6 +830,7 @@ IMPORTANT:
     screenReport = `Screening cycle failed: ${error.message}`;
   } finally {
     _screeningBusy = false;
+    drainTelegramQueue().catch(() => {});
     if (!silent && telegramEnabled()) {
       if (screenReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
@@ -864,9 +895,12 @@ export function startCronJobs() {
     await maybeRunMissedBriefing();
   }, { timezone: 'UTC' });
 
-  // Lightweight 10s PnL poller — updates trailing TP state between management cycles, no LLM
+  // Lightweight 60s PnL poller — updates trailing TP state between management cycles, no LLM
   let _pnlPollBusy = false;
   const _directClosing = new Set(); // prevent duplicate close attempts during execution
+
+  // Read from config, default 60s — was 10s, reduced for Helius rate limits
+  const pnlPollMs = (config.schedule?.pnlPollIntervalSec || 60) * 1000;
 
   const pnlPollInterval = setInterval(async () => {
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
@@ -914,7 +948,7 @@ export function startCronJobs() {
               `[PnL poller] DIRECT close: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} [PnL: ${p.pnl_pct}%] — bypassing management`,
             );
             executeTool("close_position", {
-              params: { position_address: p.position },
+              position_address: p.position,
               action: "CLOSE",
               reason: `PnL poller: ${closeRule.reason}`,
               metadata: { position: p },
@@ -974,9 +1008,29 @@ async function shutdown(signal) {
   }
   _shuttingDown = true;
 
+  // PM2 kill_timeout is 10s. Force-exit at 8s to avoid SIGKILL leaving sockets/ports bound.
+  const forceExitTimer = setTimeout(() => {
+    log("shutdown", "Force exit after 8s timeout (PM2 would SIGKILL at 10s).");
+    process.exit(1);
+  }, 8000);
+  forceExitTimer.unref?.();
+
   log("shutdown", `Received ${signal}. Shutting down...`);
-  stopPolling();
-  stopCronJobs();
+  try {
+    stopPolling();
+  } catch (e) {
+    log("shutdown", `stopPolling threw: ${e.message}`);
+  }
+  try {
+    stopCronJobs();
+  } catch (e) {
+    log("shutdown", `stopCronJobs threw: ${e.message}`);
+  }
+  try {
+    stopDashboard();
+  } catch (e) {
+    log("shutdown", `stopDashboard threw: ${e.message}`);
+  }
 
   const positions = await withTimeout(
     getMyPositions({ force: true, silent: true }).catch((error) => {
@@ -990,6 +1044,7 @@ async function shutdown(signal) {
   } else {
     log("shutdown", "Open position snapshot skipped during shutdown timeout");
   }
+  clearTimeout(forceExitTimer);
   process.exit(0);
 }
 
@@ -1102,7 +1157,7 @@ function getLatestCandidatesMeta() {
 }
 
 function describeLatestCandidates(limit = 5) {
-  if (!_latestCandidates.length) return "No cached candidates yet. Run /screen first.";
+  if (!_latestCandidates.length) return "Belum ada kandidat tersimpan. Jalankan /screen dulu.";
   const lines = _latestCandidates.slice(0, limit).map((pool, i) => {
     const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
     const vol = pool.volume_window ?? pool.volume_24h ?? "?";
@@ -1111,36 +1166,48 @@ function describeLatestCandidates(limit = 5) {
     return `${i + 1}. ${pool.name} | fee/aTVL ${feeTvl}% | vol $${vol} | in-range ${active}% | organic ${organic}`;
   });
   const age = _latestCandidatesAt ? new Date(_latestCandidatesAt).toLocaleString("en-US", { hour12: false }) : "unknown";
-  return `Latest candidates (${_latestCandidates.length}) — updated ${age}\n\n${lines.join("\n")}`;
+  return `Kandidat terbaru (${_latestCandidates.length}) — diperbarui ${age}\n\n${lines.join("\n")}`;
 }
 
 function formatWalletStatus(wallet, positions) {
   const deployAmount = computeDeployAmount(wallet.sol);
   const hive = isHiveMindEnabled() ? "on" : "off";
+  const dryRun = process.env.DRY_RUN === "true";
+  const solColor = wallet.sol > 1 ? "#4ECB71" : "#E85D5D";
   return [
-    `Wallet: ${wallet.sol} SOL ($${wallet.sol_usd})`,
-    `SOL price: $${wallet.sol_price}`,
-    `Open positions: ${positions.total_positions}/${config.risk.maxPositions}`,
-    `Next deploy amount: ${deployAmount} SOL`,
-    `Dry run: ${process.env.DRY_RUN === "true" ? "yes" : "no"}`,
-    `HiveMind: ${hive}`,
+    "<b>── STATUS WALLET ──</b>",
+    "",
+    `<b>SOL:</b> <code>${wallet.sol}</code>  <b>USD:</b> <code>$${wallet.sol_usd}</code>`,
+    `<b>Harga SOL:</b> <code>$${wallet.sol_price}</code>`,
+    `<b>Posisi:</b> <code>${positions.total_positions}/${config.risk.maxPositions}</code>`,
+    `<b>Deploy Brikutnya:</b> <code>${deployAmount} SOL</code>`,
+    `<b>HiveMind:</b> <code>${hive}</code>`,
+    `<b>Dry Run:</b> <code>${dryRun ? "ya" : "tidak"}</code>`,
   ].join("\n");
 }
 
 function formatConfigSnapshot() {
   return [
-    "Config snapshot",
+    "<b>── KONFIGURASI RUNTIME ──</b>",
     "",
-    `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | default ${config.strategy.defaultBinsBelow}`,
-    `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
-    `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
-    `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
-    `OOR: ${config.management.outOfRangeWaitMinutes}m default | fast ${FAST_OOR_MINUTES}m if fee_tvl < ${FAST_OOR_FEE_TVL_MAX}% or organic < ${FAST_OOR_ORGANIC_MAX} | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
-    `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
-    `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
-    `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
-    `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
-    `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
+    "<b>📐 Strategi</b>",
+    `<code>${config.strategy.strategy}</code> | bins: ${config.strategy.minBinsBelow}–${config.strategy.maxBinsBelow} | default: ${config.strategy.defaultBinsBelow}`,
+    "",
+    "<b>💰 Deploy & Risiko</b>",
+    `deploy: <code>${config.management.deployAmountSol} SOL</code> | gas: <code>${config.management.gasReserve}</code> | max pos: <code>${config.risk.maxPositions}</code>`,
+    `SL: <code>${config.management.stopLossPct}%</code> | TP: <code>${config.management.takeProfitPct}%</code> | trailing: <code>${config.management.trailingTakeProfit ? "on" : "off"}</code>`,
+    "",
+    "<b>⏱️ OOR & Yield</b>",
+    `tunggu: <code>${config.management.outOfRangeWaitMinutes}m</code> | yield min: <code>${config.management.minFeePerTvl24h}%</code> | umur min: <code>${config.management.minAgeBeforeYieldCheck}m</code>`,
+    "",
+    "<b>🔍 Screening</b>",
+    `<code>${config.screening.category}</code> / <code>${config.screening.timeframe}</code> | TVL: ${config.screening.minTvl}–${config.screening.maxTvl}`,
+    `Discord signals: <code>${config.screening.useDiscordSignals ? "on" : "off"}</code> | pump check: <code>${config.screening.pumpCheckEnabled ? "on" : "off"}</code>`,
+    "",
+    "<b>🔄 Interval</b>",
+    `manage: <code>${config.schedule.managementIntervalMin}m</code> | screen: <code>${config.schedule.screeningIntervalMin}m</code>`,
+    "",
+    `<b>🧠 HiveMind:</b> <code>${isHiveMindEnabled() ? "aktif" : "nonaktif"}</code>${config.hiveMind.agentId ? " | <code>" + config.hiveMind.agentId + "</code>" : ""}`,
   ].join("\n");
 }
 
@@ -1216,29 +1283,30 @@ function stepButtons(key, label, step, { digits = 2 } = {}) {
 }
 
 function renderSettingsMenu(page = "main") {
-  const title = page === "main" ? "Settings menu" : `Settings: ${page}`;
+  const title = page === "main" ? "<b>── PENGATURAN ──</b>" : `<b>── PENGATURAN: ${page.toUpperCase()} ──</b>`;
+  const enabledIcon = (val) => val ? "🟢" : "⚫";
   const summary = [
     title,
     "",
-    `Mode: ${config.management.solMode ? "SOL" : "USD"} | Relay: ${config.api.lpAgentRelayEnabled ? "on" : "off"}`,
-    `Strategy: ${config.strategy.strategy} | bins ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | deploy ${config.management.deployAmountSol} SOL`,
-    `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
-    `Indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
+    `${enabledIcon(!config.management.solMode)} USD mode | ${enabledIcon(config.api.lpAgentRelayEnabled)} LPAgent relay`,
+    `${enabledIcon(config.indicators.enabled)} Chart indicators | ${enabledIcon(config.management.trailingTakeProfit)} Trailing TP`,
+    `<b>Strategy:</b> <code>${config.strategy.strategy}</code> | bins: ${config.strategy.minBinsBelow}–${config.strategy.maxBinsBelow}`,
+    `<b>Deploy:</b> <code>${config.management.deployAmountSol} SOL</code> | TP/SL: ${config.management.takeProfitPct}%/${config.management.stopLossPct}%`,
   ].join("\n");
 
   const nav = [
     [
-      settingButton("Main", "cfg:page:main"),
-      settingButton("Risk", "cfg:page:risk"),
+      settingButton("Utama", "cfg:page:main"),
+      settingButton("Risiko", "cfg:page:risk"),
       settingButton("Screen", "cfg:page:screen"),
-      settingButton("Indicators", "cfg:page:indicators"),
+      settingButton("Indikator", "cfg:page:indicators"),
     ],
   ];
 
   const footer = [
     [
       settingButton("Refresh", `cfg:page:${page}`),
-      settingButton("Close", "cfg:close"),
+      settingButton("Tutup", "cfg:close"),
     ],
   ];
 
@@ -1301,8 +1369,8 @@ function renderSettingsMenu(page = "main") {
         settingButton("Screening", "cfg:page:screen"),
       ],
       [
-        settingButton("Indicators", "cfg:page:indicators"),
-        settingButton("Show config", "cfg:show"),
+        settingButton("Indikator", "cfg:page:indicators"),
+        settingButton("Tampil config", "cfg:show"),
       ],
     ];
   }
@@ -1338,13 +1406,13 @@ async function applySettingsMenuCallback(msg) {
     return;
   }
   if (action === "close") {
-    await answerCallbackQuery(msg.callbackQueryId, "Closed");
-    await editMessage("Settings menu closed.", msg.messageId);
+    await answerCallbackQuery(msg.callbackQueryId, "Tutup");
+    await editMessage("Menu pengaturan ditutup.", msg.messageId);
     return;
   }
   if (action === "show") {
     await answerCallbackQuery(msg.callbackQueryId);
-    await editMessageWithButtons(formatConfigSnapshot(), msg.messageId, [[settingButton("Back", "cfg:page:main")]]);
+    await editMessageWithButtons(formatConfigSnapshot(), msg.messageId, [[settingButton("Kembali", "cfg:page:main")]]);
     return;
   }
   if (action === "page") {
@@ -1362,21 +1430,21 @@ async function applySettingsMenuCallback(msg) {
     const current = Number(settingValue(key));
     const delta = Number(parts[3]);
     if (!Number.isFinite(current) || !Number.isFinite(delta)) {
-      await answerCallbackQuery(msg.callbackQueryId, "Invalid setting");
-      return;
-    }
-    value = Number((current + delta).toFixed(4));
-    if (key === "maxPositions") value = Math.max(1, Math.round(value));
-    if (key === "rsiLength") value = Math.max(2, Math.round(value));
-    if (key === "repeatDeployCooldownTriggerCount") value = Math.max(1, Math.round(value));
-    if (key === "repeatDeployCooldownHours") value = Math.max(0, Math.round(value));
-    if (key === "repeatDeployCooldownMinFeeEarnedPct") value = Math.max(0, value);
-    if (["minBinsBelow", "maxBinsBelow", "defaultBinsBelow"].includes(key)) value = Math.max(35, Math.round(value));
-    if (["deployAmountSol", "gasReserve", "maxDeployAmount"].includes(key)) value = Math.max(0, value);
+    await answerCallbackQuery(msg.callbackQueryId, "Setting invalid");
+    return;
+  }
+  value = Number((current + delta).toFixed(4));
+  if (key === "maxPositions") value = Math.max(1, Math.round(value));
+  if (key === "rsiLength") value = Math.max(2, Math.round(value));
+  if (key === "repeatDeployCooldownTriggerCount") value = Math.max(1, Math.round(value));
+  if (key === "repeatDeployCooldownHours") value = Math.max(0, Math.round(value));
+  if (key === "repeatDeployCooldownMinFeeEarnedPct") value = Math.max(0, value);
+  if (["minBinsBelow", "maxBinsBelow", "defaultBinsBelow"].includes(key)) value = Math.max(35, Math.round(value));
+  if (["deployAmountSol", "gasReserve", "maxDeployAmount"].includes(key)) value = Math.max(0, value);
   } else if (action === "set") {
     value = normalizeMenuValue(key, parts.slice(3).join(":"));
   } else {
-    await answerCallbackQuery(msg.callbackQueryId, "Unknown action");
+    await answerCallbackQuery(msg.callbackQueryId, "Aksi tidak dikenal");
     return;
   }
 
@@ -1385,7 +1453,7 @@ async function applySettingsMenuCallback(msg) {
     reason: "Telegram settings menu",
   });
   if (!result?.success) {
-    await answerCallbackQuery(msg.callbackQueryId, "Config update failed");
+    await answerCallbackQuery(msg.callbackQueryId, "Update config gagal");
     return;
   }
   page = key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
@@ -1399,28 +1467,38 @@ async function applySettingsMenuCallback(msg) {
 
 function formatHelpText() {
   return [
-    "Telegram commands",
+    "<b>── PUREXBT · PERINTAH TELEGRAM ──</b>",
     "",
-    "/help — show commands",
-    "/status — wallet + positions snapshot",
-    "/wallet — wallet, deploy amount, HiveMind status",
-    "/positions — list open positions",
-    "/pool <n> — detailed info for one open position",
-    "/close <n> — close one position by index",
-    "/closeall — close all open positions",
-    "/set <n> <note> — set note/instruction on position",
-    "/config — show important runtime config",
-    "/settings — button menu for common config",
-    "/setcfg <key> <value> — update persisted config",
-    "/screen — refresh deterministic candidate list",
-    "/candidates — show latest cached candidates",
-    "/deploy <n> — deploy candidate by cached index",
-    "/briefing — morning briefing",
-    "/hive — HiveMind sync status",
-    "/hive pull — manual HiveMind pull now",
-    "/pause — stop cron cycles",
-    "/resume — start cron cycles again",
-    "/stop — shut down agent",
+    "<b>📊 Info & Status</b>",
+    "<code>/status</code>    — ringkasan wallet + posisi",
+    "<code>/wallet</code>    — saldo, deploy amount, HiveMind",
+    "<code>/positions</code> — daftar posisi terbuka + PnL",
+    "<code>/pool 1</code>    — detail posisi nomor #1",
+    "<code>/config</code>    — konfigurasi runtime saat ini",
+    "<code>/hive</code>      — status sync HiveMind",
+    "",
+    "<b>🎯 Screening & Deploy</b>",
+    "<code>/screen</code>     — jalankan pemindaian pool deterministik",
+    "<code>/candidates</code> — tampilkan kandidat terbaru tersimpan",
+    "<code>/deploy 1</code>   — deploy kandidat berdasarkan indeks",
+    "<code>/briefing</code>   — laporan briefing pagi",
+    "",
+    "<b>🔧 Kontrol Posisi</b>",
+    "<code>/close 1</code>    — tutup posisi berdasarkan indeks",
+    "<code>/closeall</code>   — tutup SEMUA posisi terbuka",
+    "<code>/set 1 note</code> — pasang catatan di posisi",
+    "",
+    "<b>⚙️ Konfigurasi</b>",
+    "<code>/settings</code>   — menu tombol interaktif",
+    "<code>/setcfg key val</code> — update config langsung",
+    "",
+    "<b>⏯️ Sistem</b>",
+    "<code>/pause</code>  — hentikan siklus otonom",
+    "<code>/resume</code> — lanjutkan siklus otonom",
+    "<code>/stop</code>   — matikan agent",
+    "",
+    "<b>💬 Chat</b>",
+    "Pesan apa saja → agent LLM merespon secara natural",
   ].join("\n");
 }
 
@@ -1434,20 +1512,20 @@ async function runDeterministicScreen(limit = 5) {
       const vol = pool.volume_window ?? pool.volume_24h ?? "?";
       return `${i + 1}. ${pool.name} | ${pool.pool}\n   fee/aTVL ${feeTvl}% | vol $${vol} | organic ${pool.organic_score ?? "?"}`;
     });
-    return `Top candidates (${candidates.length})\n\n${lines.join("\n")}`;
+    return `Kandidat teratas (${candidates.length})\n\n${lines.join("\n")}`;
   }
   const examples = (top?.filtered_examples || []).slice(0, 3)
     .map((entry) => `- ${entry.name}: ${entry.reason}`)
     .join("\n");
   return examples
-    ? `No candidates available.\nFiltered examples:\n${examples}`
-    : "No candidates available right now.";
+    ? `Tidak ada kandidat tersedia.\nContoh terfilter:\n${examples}`
+    : "Tidak ada kandidat tersedia saat ini.";
 }
 
 async function deployLatestCandidate(index) {
   const candidate = _latestCandidates[index];
   if (!candidate) {
-    throw new Error("Invalid candidate index. Run /screen first.");
+    throw new Error("Indeks kandidat invalid. Jalankan /screen dulu.");
   }
   if (_latestCandidates.length === 1) {
     const mint = candidate.base?.mint || candidate.base_mint || null;
@@ -1472,7 +1550,7 @@ async function deployLatestCandidate(index) {
         pool: candidate.pool,
         pool_name: candidate.name,
       });
-      throw new Error(`NO DEPLOY: only cached candidate ${candidate.name} is not worth deploying — ${skipReason}`);
+      throw new Error(`NO DEPLOY: kandidat tunggal ${candidate.name} tidak layak deploy — ${skipReason}`);
     }
   }
   const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
@@ -1532,15 +1610,15 @@ async function telegramHandler(msg) {
     return;
   }
   if (text === "/settings" || text === "/menu" || text === "/configmenu") {
-    await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
+    await showSettingsMenu().catch((e) => sendMessage(`Error settings: ${e.message}`).catch(() => {}));
     return;
   }
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);
-      sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
+      sendHTML(`⏳ <b>Antrian #${_telegramQueue.length}</b>: "${text.slice(0, 60)}"`).catch(() => {});
     } else {
-      sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
+      sendHTML("⚠️ <b>Antrian penuh</b> (5 pesan). Tunggu agent selesai.").catch(() => {});
     }
     return;
   }
@@ -1556,7 +1634,7 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/help") {
-    await sendMessage(formatHelpText()).catch(() => {});
+    await sendHTML(formatHelpText()).catch(() => {});
     return;
   }
 
@@ -1564,9 +1642,9 @@ async function telegramHandler(msg) {
     try {
       const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
       const suffix = text === "/status" && positions.total_positions
-        ? `\n\nUse /positions for the numbered list.`
+        ? `\n\nGunakan /positions untuk daftar bernomor.`
         : "";
-      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
+      await sendHTML(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1574,22 +1652,32 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/config") {
-    await sendMessage(formatConfigSnapshot()).catch(() => {});
+    await sendHTML(formatConfigSnapshot()).catch(() => {});
     return;
   }
 
   if (text === "/positions") {
     try {
       const { positions, total_positions } = await getMyPositions({ force: true });
-      if (total_positions === 0) { await sendMessage("No open positions."); return; }
+      if (total_positions === 0) { await sendHTML("<b>── POSISI ──</b>\n\nTidak ada posisi terbuka saat ini."); return; }
       const cur = config.management.solMode ? "◎" : "$";
       const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
+        const pnlUsd = p.pnl_usd != null ? Number(p.pnl_usd) : 0;
+        const pnlPct = p.pnl_pct != null ? Number(p.pnl_pct) : null;
+        const pnlSign = pnlUsd >= 0 ? "+" : "";
+        const pnlColor = pnlUsd >= 0 ? "#4ECB71" : "#E85D5D";
+        const emoji = pnlUsd >= 0 ? "🟢" : "🔴";
+        const pnlStr = `${emoji} ${pnlSign}${cur}${Math.abs(pnlUsd).toFixed(2)}${pnlPct != null ? " (" + pnlSign + pnlPct.toFixed(2) + "%)" : ""}`;
         const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
+        const oorTag = !p.in_range ? " ⚠️ OOR" : "";
+        return [
+          `<b>${i + 1}. ${p.pair}</b>`,
+          `Nilai: <code>${cur}${p.total_value_usd ?? "?"}</code> | PnL: ${pnlStr}`,
+          `Fee: <code>${cur}${p.unclaimed_fees_usd ?? "?"}</code> | Umur: <code>${age}</code>${oorTag}`,
+          `<code>/close ${i + 1}</code> tutup | <code>/pool ${i + 1}</code> detail`,
+        ].join("\n");
       });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
+      await sendHTML(`<b>── POSISI (${total_positions}) ──</b>\n\n${lines.join("\n\n")}`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1599,18 +1687,27 @@ async function telegramHandler(msg) {
     try {
       const idx = parseInt(poolMatch[1]) - 1;
       const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      if (idx < 0 || idx >= positions.length) { await sendMessage("Nomor invalid. Gunakan /positions dulu."); return; }
       const pos = positions[idx];
-      await sendMessage([
-        `${idx + 1}. ${pos.pair}`,
-        `Pool: ${pos.pool}`,
-        `Position: ${pos.position}`,
-        `Range: ${pos.lower_bin} → ${pos.upper_bin} | active ${pos.active_bin}`,
-        `PnL: ${pos.pnl_pct ?? "?"}% | fees: ${config.management.solMode ? "◎" : "$"}${pos.unclaimed_fees_usd ?? "?"}`,
-        `Value: ${config.management.solMode ? "◎" : "$"}${pos.total_value_usd ?? "?"}`,
-        `Age: ${pos.age_minutes ?? "?"}m | ${pos.in_range ? "IN RANGE" : `OOR ${pos.minutes_out_of_range ?? 0}m`}`,
-        pos.instruction ? `Note: ${pos.instruction}` : null,
-      ].filter(Boolean).join("\n"));
+      const pnlUsd = pos.pnl_usd != null ? Number(pos.pnl_usd) : 0;
+      const pnlSign = pnlUsd >= 0 ? "+" : "";
+      const emoji = pnlUsd >= 0 ? "🟢" : "🔴";
+      const rangeStatus = pos.in_range ? "🟢 DALAM RANGE" : `🔴 OOR ${pos.minutes_out_of_range ?? 0}m`;
+      const cur = config.management.solMode ? "◎" : "$";
+      await sendHTML([
+        `<b>── POOL: ${pos.pair} ──</b>`,
+        "",
+        `<b>Pool:</b> <code>${pos.pool}</code>`,
+        `<b>Posisi:</b> <code>${pos.position}</code>`,
+        `<b>Range:</b> bin <code>${pos.lower_bin} → ${pos.upper_bin}</code> | active <code>${pos.active_bin}</code>`,
+        `<b>PnL:</b> ${emoji} ${pnlSign}${cur}${Math.abs(pnlUsd).toFixed(2)} (${pnlSign}${(pos.pnl_pct ?? 0).toFixed(2)}%)`,
+        `<b>Fee:</b> <code>${cur}${pos.unclaimed_fees_usd ?? "?"}</code>`,
+        `<b>Nilai:</b> <code>${cur}${pos.total_value_usd ?? "?"}</code>`,
+        `<b>Umur:</b> <code>${pos.age_minutes ?? "?"}m</code> | ${rangeStatus}`,
+        pos.instruction ? `\n<b>Catatan:</b> ${pos.instruction}` : "",
+        "",
+        `<code>/close ${idx + 1}</code> untuk tutup`,
+      ].filter(Boolean).join("\n")).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1622,16 +1719,24 @@ async function telegramHandler(msg) {
     try {
       const idx = parseInt(closeMatch[1]) - 1;
       const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      if (idx < 0 || idx >= positions.length) { await sendMessage("Nomor invalid. Gunakan /positions dulu."); return; }
       const pos = positions[idx];
-      await sendMessage(`Closing ${pos.pair}...`);
+      await sendMessage(`Menutup <b>${pos.pair}</b>...`).catch(() => {});
       const result = await closePosition({ position_address: pos.position });
       if (result.success) {
         const closeTxs = result.close_txs?.length ? result.close_txs : result.txs;
-        const claimNote = result.claim_txs?.length ? `\nClaim txs: ${result.claim_txs.join(", ")}` : "";
-        await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "$"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}`);
+        const claimNote = result.claim_txs?.length ? `\nclaim tx: ${result.claim_txs.join(", ")}` : "";
+        const pnlUsd = result.pnl_usd != null ? Number(result.pnl_usd) : 0;
+        const pnlSign = pnlUsd >= 0 ? "+" : "";
+        const emoji = pnlUsd >= 0 ? "🟢" : "🔴";
+        await sendHTML(
+          `<b>── TERTUTUP ──</b>\n\n` +
+          `<b>Pool:</b> ${pos.pair}\n` +
+          `<b>PnL:</b> ${emoji} ${pnlSign}$${Math.abs(pnlUsd).toFixed(2)}\n` +
+          `<b>Tx:</b> <code>${(closeTxs?.[0] || "n/a").slice(0, 16)}...</code>${claimNote}`
+        ).catch(() => {});
       } else {
-        await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
+        await sendMessage(`❌ Tutup gagal: ${result.reason || JSON.stringify(result)}`).catch(() => {});
       }
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
@@ -1640,18 +1745,19 @@ async function telegramHandler(msg) {
   if (text === "/closeall") {
     try {
       const { positions } = await getMyPositions({ force: true });
-      if (!positions.length) { await sendMessage("No open positions."); return; }
-      await sendMessage(`Closing ${positions.length} position(s)...`);
+      if (!positions.length) { await sendMessage("Tidak ada posisi terbuka."); return; }
+      await sendMessage(`Menutup <b>${positions.length}</b> posisi...`).catch(() => {});
       const results = [];
       for (const pos of positions) {
         try {
           const result = await closePosition({ position_address: pos.position });
-          results.push(`${pos.pair}: ${result.success ? "closed" : `failed (${result.error || "unknown"})`}`);
+          const icon = result.success ? "✅" : "❌";
+          results.push(`${icon} ${pos.pair}: ${result.success ? "tertutup" : `gagal (${result.reason || "tidak diketahui"})`}`);
         } catch (error) {
-          results.push(`${pos.pair}: failed (${error.message})`);
+          results.push(`❌ ${pos.pair}: gagal (${error.message})`);
         }
       }
-      await sendMessage(`Close-all finished.\n\n${results.join("\n")}`).catch(() => {});
+      await sendHTML(`<b>── TUTUP SEMUA SELESAI ──</b>\n\n${results.join("\n")}`).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1664,10 +1770,10 @@ async function telegramHandler(msg) {
       const idx = parseInt(setMatch[1]) - 1;
       const note = setMatch[2].trim();
       const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      if (idx < 0 || idx >= positions.length) { await sendMessage("Nomor invalid. Gunakan /positions dulu."); return; }
       const pos = positions[idx];
       setPositionInstruction(pos.position, note);
-      await sendMessage(`✅ Note set for ${pos.pair}:\n"${note}"`);
+      await sendHTML(`<b>✅ Catatan dipasang untuk ${pos.pair}</b>\n<code>"${note}"</code>`).catch(() => {});
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1682,10 +1788,10 @@ async function telegramHandler(msg) {
         reason: "Telegram slash command /setcfg",
       });
       if (!result?.success) {
-        await sendMessage(`Config update failed.\nUnknown: ${(result?.unknown || []).join(", ") || "none"}`).catch(() => {});
+        await sendMessage(`Config gagal.\nTidak dikenal: ${(result?.unknown || []).join(", ") || "tidak ada"}`).catch(() => {});
         return;
       }
-      await sendMessage(`✅ Updated ${key} = ${JSON.stringify(value)}`).catch(() => {});
+      await sendHTML(`<b>✅ Diperbarui</b> <code>${key}</code> = <code>${JSON.stringify(value)}</code>`).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1694,7 +1800,8 @@ async function telegramHandler(msg) {
 
   if (text === "/screen") {
     try {
-      await sendMessage(await runDeterministicScreen(5)).catch(() => {});
+      const result = await runDeterministicScreen(5);
+      await sendHTML(`<b>── HASIL SCREENING ──</b>\n\n${result}`).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -1702,7 +1809,8 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/candidates") {
-    await sendMessage(describeLatestCandidates(5)).catch(() => {});
+    const result = describeLatestCandidates(5);
+    await sendHTML(`<b>── KANDIDAT TERSIMPAN ──</b>\n\n<pre>${result}</pre>`).catch(() => {});
     return;
   }
 
@@ -1714,13 +1822,15 @@ async function telegramHandler(msg) {
       const coverage = result.range_coverage
         ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
         : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
-      await sendMessage([
-        `✅ Deployed ${candidate.name}`,
-        `Pool: ${candidate.pool}`,
-        `Amount: ${deployAmount} SOL`,
+      await sendHTML([
+        `<b>── TERDEPLOY ──</b>`,
+        "",
+        `<b>Pool:</b> ${candidate.name}`,
+        `<b>Alamat:</b> <code>${candidate.pool}</code>`,
+        `<b>Jumlah:</b> <code>${deployAmount} SOL</code>`,
         coverage,
-        `Position: ${result.position || "n/a"}`,
-        result.txs?.length ? `Tx: ${result.txs[0]}` : null,
+        `<b>Posisi:</b> <code>${(result.position || "n/a").slice(0, 12)}...</code>`,
+        result.txs?.length ? `<b>Tx:</b> <code>${result.txs[0].slice(0, 16)}...</code>` : null,
       ].filter(Boolean).join("\n")).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
@@ -1731,7 +1841,7 @@ async function telegramHandler(msg) {
   if (text === "/pause") {
     stopCronJobs();
     cronStarted = false;
-    await sendMessage("⏸ Paused autonomous cycles. Telegram control still works. Use /resume to start again.").catch(() => {});
+    await sendHTML("<b>⏸ PAUSED</b>\n\nSiklus otonom dihentikan. Kontrol Telegram tetap berfungsi.\nGunakan <code>/resume</code> untuk memulai lagi.").catch(() => {});
     return;
   }
 
@@ -1741,9 +1851,9 @@ async function telegramHandler(msg) {
       timers.managementLastRun = Date.now();
       timers.screeningLastRun = Date.now();
       startCronJobs();
-      await sendMessage("▶️ Autonomous cycles resumed.").catch(() => {});
+      await sendHTML("<b>▶️ DILANJUTKAN</b>\n\nSiklus otonom dimulai kembali.").catch(() => {});
     } else {
-      await sendMessage("Autonomous cycles are already running.").catch(() => {});
+      await sendHTML("Siklus otonom sudah berjalan.").catch(() => {});
     }
     return;
   }
@@ -1753,7 +1863,7 @@ async function telegramHandler(msg) {
       const enabled = isHiveMindEnabled();
       const agentId = ensureAgentId();
       if (!enabled) {
-        await sendMessage(`HiveMind: disabled\nAgent ID: ${agentId}\nSet hiveMindApiKey to connect.`).catch(() => {});
+        await sendHTML(`<b>── HIVEMIND ──</b>\n\n<b>Status:</b> nonaktif\n<b>Agent ID:</b> <code>${agentId}</code>\n\nIsi <code>hiveMindApiKey</code> untuk terhubung.`).catch(() => {});
         return;
       }
       const isManualPull = text === "/hive pull";
@@ -1763,15 +1873,18 @@ async function telegramHandler(msg) {
         (pullMode === "auto" || isManualPull) ? pullHiveMindLessons(12) : Promise.resolve(null),
         (pullMode === "auto" || isManualPull) ? pullHiveMindPresets() : Promise.resolve(null),
       ]);
-      await sendMessage([
-        "HiveMind: enabled",
-        `Agent ID: ${agentId}`,
-        `URL: ${config.hiveMind.url}`,
-        `Pull mode: ${pullMode}`,
-        `Register: ${registerResult ? "ok" : "warn"}`,
-        `Shared lessons: ${Array.isArray(lessons) ? lessons.length : (pullMode === "manual" ? "manual" : 0)}`,
-        `Presets: ${Array.isArray(presets) ? presets.length : (pullMode === "manual" ? "manual" : 0)}`,
-        isManualPull ? "Manual pull: completed" : null,
+      await sendHTML([
+        `<b>── HIVEMIND ──</b>`,
+        "",
+        `<b>Status:</b> aktif`,
+        "",
+        `<b>Agent ID:</b> <code>${agentId}</code>`,
+        `<b>URL:</b> <code>${config.hiveMind.url}</code>`,
+        `<b>Mode pull:</b> <code>${pullMode}</code>`,
+        `<b>Register:</b> <code>${registerResult ? "ok" : "warn"}</code>`,
+        `<b>Lesson bersama:</b> <code>${Array.isArray(lessons) ? lessons.length : (pullMode === "manual" ? "manual" : 0)}</code>`,
+        `<b>Preset:</b> <code>${Array.isArray(presets) ? presets.length : (pullMode === "manual" ? "manual" : 0)}</code>`,
+        isManualPull ? "\nPull manual: selesai" : null,
       ].join("\n")).catch(() => {});
     } catch (e) {
       await sendMessage(`HiveMind error: ${e.message}`).catch(() => {});
@@ -1787,7 +1900,7 @@ async function telegramHandler(msg) {
     const isDeployRequest = !hasCloseIntent && /\bdeploy\b|\bopen position\b|\blp into\b|\badd liquidity\b/i.test(text);
     const agentRole = isDeployRequest ? "SCREENER" : "GENERAL";
     const agentModel = agentRole === "SCREENER" ? config.llm.screeningModel : config.llm.generalModel;
-    liveMessage = await createLiveMessage("🤖 Live Update", `Request: ${text.slice(0, 240)}`);
+    liveMessage = await createLiveMessage("🤖 Live Update", `Permintaan: ${text.slice(0, 240)}`);
     const { content } = await agentLoop(text, config.llm.maxSteps, sessionHistory, agentRole, agentModel, null, {
       interactive: true,
       onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },

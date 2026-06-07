@@ -141,19 +141,30 @@ export async function sendHTML(html) {
   return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
 }
 
+// Track last-edited content to skip Telegram "message is not modified" 400 errors
+const _lastEdits = new Map();
+
 export async function editMessage(text, messageId) {
   if (!TOKEN || !chatId || !messageId) return null;
+  const t = String(text).slice(0, 4096);
+  const key = `${messageId}`;
+  if (_lastEdits.get(key) === t) return null;  // skip — content unchanged
+  _lastEdits.set(key, t);
   return postTelegram("editMessageText", {
     message_id: messageId,
-    text: String(text).slice(0, 4096),
+    text: t,
   });
 }
 
 export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
   if (!TOKEN || !chatId || !messageId) return null;
+  const t = String(text).slice(0, 4096);
+  const key = `${messageId}_btn`;
+  if (_lastEdits.get(key) === t) return null;  // skip — content unchanged
+  _lastEdits.set(key, t);
   return postTelegram("editMessageText", {
     message_id: messageId,
-    text: String(text).slice(0, 4096),
+    text: t,
     reply_markup: { inline_keyboard: inlineKeyboard },
   });
 }

@@ -21,20 +21,15 @@ hivemind.js         Agent Meridian HiveMind sync
 smart-wallets.js    KOL/alpha wallet tracker (smart-wallets.json)
 token-blacklist.js  Permanent token blacklist (token-blacklist.json)
 logger.js           Daily-rotating log files + action audit trail
-decision-log.js     Decision/event log (deploy, close, claim, swap, system)
-dashboard.js        HTTP server (all /api/* routes, preview auth, equity curve)
-dashboard-ui.html   Terminal-pink dashboard UI (vanilla HTML/CSS/JS)
-discord-listener/   Selfbot watches LP Army channels → discord-signals.json
 
 tools/
   definitions.js    Tool schemas in OpenAI format (what LLM sees)
   executor.js       Tool dispatch: name → fn, safety checks, pre/post hooks
   dlmm.js           Meteora DLMM SDK wrapper (deploy, close, claim, positions, PnL)
-  screening.js      Pool discovery from Meteora API + Discord merge + GMGN pump filter
-  wallet.js         SOL/token balances (Helius) + Jupiter swap (V2, referral support)
+  screening.js      Pool discovery from Meteora API
+  wallet.js         SOL/token balances (Helius) + Jupiter swap
   token.js          Token info/holders/narrative (Jupiter API)
   study.js          Top LPer study via LPAgent API
-  gmgn.js           GMGN API client — meme token pump detection, kline, security
 ```
 
 ---
@@ -234,93 +229,3 @@ Agent Meridian HiveMind sync is handled by `hivemind.js`. It uses built-in Agent
 - `evolveThresholds()` adapts only 2 params (`minFeeActiveTvlRatio`, `minOrganic`); the other ~15 screening thresholds could benefit from evolution.
 - No lesson deduplication — database grows unbounded as more positions close.
 - No lesson confidence decay — old lessons weighted equally to recent ones.
-
----
-
-## Discord Signal Pipeline
-
-`discord-listener/` is a selfbot that monitors LP Army Discord channels for "Metlex Pool Bot" messages. When it detects a Solana pool address:
-
-1. Runs pre-checks (rug score, fees, token age)
-2. Saves to `discord-signals.json` with fields: `pool_address`, `base_mint`, `base_symbol`, `discord_author`, `discord_channel`, `rug_score`, `total_fees_sol`, `token_age_minutes`, `status: "pending"`
-
-Tools available to the agent:
-- `get_discord_signals` — fetch pending signals
-- `get_author_stats` — author reliability stats
-- `fetch_discord` — recent signals (channel-aware)
-- `read_discord_channel` — raw channel history
-
-Signals auto-merge into screening via `discoverPools()` in `screening.js` when `useDiscordSignals: true`. Pool-scorer gives score bonus for discord_signal pools.
-
-Config: `useDiscordSignals`, `discordSignalMode` (merge/only)
-
----
-
-## GMGN Pump Detection
-
-`tools/gmgn.js` integrates with GMGN API (https://openapi.gmgn.ai) for meme token chart data:
-
-- `getTokenInfo(mint)` — price + price_change_1m/5m/1h/6h/24h
-- `getTokenKline(mint, {resolution, count})` — OHLCV candles
-- `getTokenSecurity(mint)` — rug / honeypot checks
-- `pumpCheckFilter(candidates, filteredOut, maxPumpPct1h)` — bulk filter
-
-Injected into `getTopCandidates()` in `screening.js` after OKX enrichment. Tokens pumped above `maxPumpPct1h` (1h price change %) are filtered out before LLM sees them.
-
-Config: `pumpCheckEnabled` (bool), `maxPumpPct1h` (number, e.g. 20)
-
----
-
-## Jupiter Referral
-
-All swaps route through `swapToken()` in `tools/wallet.js` which attaches Jupiter referral params automatically:
-
-- `referralAccount` — your Solana public key
-- `referralFeeBps` — fee in basis points (50–255, Ultra-compatible)
-
-Two automatic swap branches carry referral:
-1. Post-close auto-swap (base token → SOL)
-2. Post-claim auto-compound (claimed token → SOL)
-
-Runtime proof in swap return payload: `referral_account`, `fee_bps_applied`, `fee_mint`.
-
-Config: `jupiter.referralAccount`, `jupiter.referralFeeBps` in `user-config.json`
-
----
-
-## Dashboard HTTP Server
-
-The pureXBT agent runs a built-in HTTP server on port 3000 (native Node `http`, no Express):
-
-| Route | Method | Auth | Purpose |
-|-------|--------|------|---------|
-| `/api/state` | GET | Role | Wallet balances, positions, PnL, solPrice |
-| `/api/stats` | GET | Role | Period-aggregated performance stats |
-| `/api/history` | GET | Role | Position history with claims info |
-| `/api/equity-curve` | GET | Role | Time-aggregated equity curve (1D/7D/30D/90D/1Y/ALL) |
-| `/api/config` | GET | Role | Full runtime config |
-| `/api/config` | POST | Owner | Update config (live + persist) |
-| `/api/action` | POST | Owner | Execute tool by name |
-| `/api/chat` | POST | Owner | LLM chat with full tool access |
-| `/api/auth/preview` | POST | Role | Generate preview token |
-
-Auth: Basic Auth for owner; preview mode via `x-dashboard-role` header (no password, read-only).
-
-Nginx reverse-proxies from `https://dlmm.purexbt.dev` → `localhost:3000`.
-
----
-
-## New Environment Variables
-
-| Var | Purpose |
-|-----|---------|
-| `GMGN_API_KEY` | GMGN API key for meme token pump detection |
-| `DISCORD_TOKEN` | Discord selfbot token for signal listener |
-| `DISCORD_GUILD_ID` | Guild ID to monitor |
-| `DISCORD_CHANNEL_IDS` | Comma-separated channel IDs |
-| `DISCORD_MIN_FEES_SOL` | Minimum fees threshold for signals |
-| `LLM_API_KEY` | Direct LLM API key (DeepSeek, etc.) |
-| `LLM_BASE_URL` | LLM provider base URL |
-| `DASHBOARD_AUTH_USER` | Dashboard Basic Auth username |
-| `DASHBOARD_AUTH_PASS` | Dashboard Basic Auth password |
-| `DASHBOARD_PREVIEW_ENABLED` | Enable read-only preview mode |

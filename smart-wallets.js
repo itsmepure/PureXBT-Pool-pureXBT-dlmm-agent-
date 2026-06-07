@@ -36,6 +36,19 @@ export function addSmartWallet({ name, address, category = "alpha", type = "lp" 
   return { success: true, wallet: { name, address, category, type } };
 }
 
+export function updateSmartWallet({ address, name, category, type }) {
+  const data = loadWallets();
+  const w = data.wallets.find((w) => w.address === address);
+  if (!w) return { success: false, error: "Wallet not found" };
+  const oldName = w.name;
+  if (name !== undefined && name.trim()) w.name = name.trim();
+  if (category !== undefined && category.trim()) w.category = category.trim();
+  if (type !== undefined && type.trim()) w.type = type.trim();
+  saveWallets(data);
+  log("smart_wallets", `Updated wallet "${oldName}" → name=${w.name} cat=${w.category} type=${w.type}`);
+  return { success: true, wallet: { name: w.name, address, category: w.category, type: w.type, addedAt: w.addedAt } };
+}
+
 export function removeSmartWallet({ address }) {
   const data = loadWallets();
   const wallet = data.wallets.find((w) => w.address === address);
@@ -109,4 +122,58 @@ export async function checkSmartWalletsOnPool({ pool_address }) {
       ? `${inPool.length}/${wallets.length} smart wallet(s) are in this pool: ${inPool.map((w) => w.name).join(", ")} — STRONG signal`
       : `0/${wallets.length} smart wallets in this pool — neutral, rely on fundamentals`,
   };
+}
+
+export async function getAllTrackedPools() {
+  const { wallets: allWallets } = loadWallets();
+  const wallets = allWallets.filter((w) => !w.type || w.type === "lp");
+  if (wallets.length === 0) return [];
+
+  const { getWalletPositions } = await import("./tools/dlmm.js");
+
+  const results = await Promise.all(wallets.map(async (wallet) => {
+    try {
+      const cached = _cache.get(wallet.address);
+      if (cached && Date.now() - cached.fetchedAt < CACHE_TTL) {
+        return { wallet, positions: cached.positions };
+      }
+      let pending = _inflight.get(wallet.address);
+      if (!pending) {
+        pending = getWalletPositions({ wallet_address: wallet.address })
+          .then((r) => r?.positions || [])
+          .finally(() => _inflight.delete(wallet.address));
+        _inflight.set(wallet.address, pending);
+      }
+      const positions = await pending;
+      _cache.set(wallet.address, { positions, fetchedAt: Date.now() });
+      return { wallet, positions };
+    } catch {
+      return { wallet, positions: [] };
+    }
+  }));
+
+  const byPool = new Map();
+  for (const { wallet, positions } of results) {
+    for (const pos of positions) {
+      const addr = pos.pool || pos.pool_address;
+      if (!addr) continue;
+      if (!byPool.has(addr)) {
+        byPool.set(addr, {
+          pool_address: addr,
+          pool_name: pos.pool_name || addr.slice(0, 8) + "...",
+          pool: { pool_address: addr, name: pos.pool_name || addr, _smart_wallet_tracked: true },
+          tracked_by: [],
+        });
+      }
+      byPool.get(addr).tracked_by.push({
+        name: wallet.name,
+        category: wallet.category,
+        address: wallet.address,
+      });
+    }
+  }
+
+  const result = Array.from(byPool.values());
+  log("smart_wallets", `getAllTrackedPools: ${result.length} unique pools across ${wallets.length} wallets, ${results.reduce((s,r) => s + r.positions.length, 0)} total positions`);
+  return result;
 }

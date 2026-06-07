@@ -9,7 +9,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { loadWeights } from "../signal-weights.js";
-import { pumpCheckFilter } from "./gmgn.js";
+import { pumpCheckFilter, securityCheckFilter, enrichTopHolders, discoverTrendingPools } from "./gmgn.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -86,6 +86,27 @@ function computeOorPenalty(pool) {
   return penalty;
 }
 
+/**
+ * ATH-distance soft cap.
+ * If a token is within athSoftCapPct of its all-time high, cap the score
+ * at athSoftCapMaxScore. The candidate still reaches the LLM, but ranks lower.
+ *
+ * @param {number} score        — current score (0-100)
+ * @param {number} athDistance  — |price_vs_ath_pct| (0 = at ATH, 100 = halfway to zero)
+ * @param {object} cfg          — screening config object
+ * @returns {{ score: number, capped: boolean, athDistance: number|null }}
+ */
+export function computeAthSoftCap(score, athDistance, cfg) {
+  if (!cfg || cfg.athSoftCapEnabled === false) return { score, capped: false, athDistance };
+  if (athDistance == null || !Number.isFinite(athDistance)) {
+    return { score, capped: false, athDistance: null };
+  }
+  if (athDistance <= cfg.athSoftCapPct && score > cfg.athSoftCapMaxScore) {
+    return { score: cfg.athSoftCapMaxScore, capped: true, athDistance };
+  }
+  return { score, capped: false, athDistance };
+}
+
 function scoreCandidate(pool) {
   const w = getCachedWeights();
   const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
@@ -101,7 +122,16 @@ function scoreCandidate(pool) {
     mcap / 10000 * (w.mcap ?? 1)
   );
   const penalty = computeOorPenalty(pool);
-  return baseScore * penalty;
+  let finalScore = baseScore * penalty;
+
+  // ATH soft-cap: cap score if token is near all-time high
+  const athDistance = pool.price_vs_ath_pct != null ? Math.abs(pool.price_vs_ath_pct) : null;
+  const athResult = computeAthSoftCap(finalScore, athDistance, config.screening);
+  if (athResult.capped) {
+    log("screening", `[ATH] Cap applied: ${pool.name || pool.pool_address} ath=${athResult.athDistance.toFixed(1)}% score=${finalScore.toFixed(0)}->${athResult.score}`);
+    finalScore = athResult.score;
+  }
+  return finalScore;
 }
 
 function numeric(value) {
@@ -279,13 +309,7 @@ async function fetchPoolDiscoveryPage({ page_size, filters, timeframe, category 
     `&timeframe=${timeframe}` +
     `&category=${category}`;
 
-  const res = await fetch(url);
-
-  if (!res.ok) {
-    throw new Error(`Pool Discovery API error: ${res.status} ${res.statusText}`);
-  }
-
-  return res.json();
+  return meteoraFetchWithCache(url);
 }
 
 async function fetchPoolDiscoveryDetail({ poolAddress, timeframe }) {
@@ -294,14 +318,101 @@ async function fetchPoolDiscoveryDetail({ poolAddress, timeframe }) {
     `&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}` +
     `&timeframe=${timeframe}`;
 
+  const data = await meteoraFetchWithCache(url);
+  return (data?.data || [])[0] ?? null;
+}
+
+async function fetchPoolByMint(mint, timeframe) {
+  const url = `${POOL_DISCOVERY_BASE}/pools?` +
+    `page_size=5` +
+    `&filter_by=${encodeURIComponent(`base_token=${mint},pool_type=dlmm`)}` +
+    `&timeframe=${timeframe}` +
+    `&category=${config.screening.category}`;
+
+  try {
+    const data = await meteoraFetchWithCache(url);
+    return (data?.data || [])[0] ?? null;
+  } catch (err) {
+    // Pool-by-mint is opportunistic (used for token enrichment); null on failure is fine
+    return null;
+  }
+}
+
+// ─── Meteora API: cache + retry/backoff + throttle ──────────────────────
+// Pool Discovery API limit: 30 RPS. We:
+// - Cache by full URL (incl. filters) — 120s TTL
+// - Dedup concurrent calls (share 1 in-flight per URL)
+// - Throttle: max 3 calls/sec globally (well below 30 RPS limit)
+// - 5-attempt exponential backoff on 429, respects Retry-After header
+// - On final failure, throws
+const _meteoraCache = new Map(); // url -> { data, until }
+const METEORA_CACHE_TTL_MS = 120_000; // 2 minutes
+const _meteoraInflight = new Map();   // url -> Promise
+const METEORA_RETRY_MAX = 5;
+const METEORA_RETRY_BASE_MS = 2000;
+const METEORA_RETRY_MAX_MS = 60000;
+let _meteoraLastCall = 0;           // throttle: epoch ms of last fetch() call
+const METEORA_THROTTLE_MS = 1000;    // 1 call/sec — well below 30 RPS Meteora limit
+
+/**
+ * Fetch from Meteora Pool Discovery API with cache + retry/backoff.
+ * - 120s in-memory cache, keyed by full URL
+ * - Dedup concurrent calls (share 1 in-flight)
+ * - 3-attempt exponential backoff on 429, respects Retry-After header
+ * - On final failure, throws
+ */
+export async function meteoraFetchWithCache(url) {
+  // 1. Cache hit
+  const cached = _meteoraCache.get(url);
+  if (cached && Date.now() < cached.until) return cached.data;
+
+  // 2. Dedup in-flight
+  if (_meteoraInflight.has(url)) return _meteoraInflight.get(url);
+
+  // 3. Fetch with retry
+  const promise = meteoraFetchWithRetry(url, 1);
+  _meteoraInflight.set(url, promise);
+  try {
+    const data = await promise;
+    _meteoraCache.set(url, { data, until: Date.now() + METEORA_CACHE_TTL_MS });
+    return data;
+  } finally {
+    _meteoraInflight.delete(url);
+  }
+}
+
+async function meteoraFetchWithRetry(url, attempt) {
+  // Global throttle — prevents burst of 60+ calls in 21ms (LLM parallel tool calls)
+  const now = Date.now();
+  const throttleWait = Math.max(0, METEORA_THROTTLE_MS - (now - _meteoraLastCall));
+  if (throttleWait > 0) await new Promise((r) => setTimeout(r, throttleWait));
+  _meteoraLastCall = Date.now();
+
   const res = await fetch(url);
 
-  if (!res.ok) {
-    throw new Error(`Pool detail API error: ${res.status} ${res.statusText}`);
+  if (res.status === 429 && attempt <= METEORA_RETRY_MAX) {
+    const retryAfter = parseInt(res.headers.get("retry-after") || "0", 10);
+    const waitMs = retryAfter > 0
+      ? Math.min(retryAfter * 1000, METEORA_RETRY_MAX_MS)
+      : Math.min(METEORA_RETRY_BASE_MS * Math.pow(2, attempt - 1), METEORA_RETRY_MAX_MS);
+    log("screening", `Meteora 429 — waiting ${waitMs}ms (attempt ${attempt}/${METEORA_RETRY_MAX}) url=${url.slice(0, 80)}...`);
+    await new Promise((r) => setTimeout(r, waitMs));
+    return meteoraFetchWithRetry(url, attempt + 1);
   }
 
-  const data = await res.json();
-  return (data.data || [])[0] ?? null;
+  if (!res.ok) {
+    throw new Error(`Pool Discovery API error: ${res.status} ${res.statusText}`);
+  }
+
+  return res.json();
+}
+
+/**
+ * Reset the Meteora cache and in-flight map. Test-only.
+ */
+export function _resetMeteoraCache() {
+  _meteoraCache.clear();
+  _meteoraInflight.clear();
 }
 
 async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
@@ -587,6 +698,65 @@ export async function discoverPools({
     }
   }
 
+  // GMGN trending discovery — early warning: find trending tokens that have DLMM pools
+  if (config.screening.trendingDiscoveryEnabled) {
+    const trendingResults = await discoverTrendingPools({
+      interval: "1h",
+      limit: 50,
+      fetchPoolDetail: (mint) => fetchPoolByMint(mint, s.timeframe),
+    }).catch((err) => {
+      log("screening", `Trending discovery failed: ${err.message}`);
+      return [];
+    });
+    if (trendingResults.length > 0) {
+      const byPool = new Map(rawPools.map((p) => [p.pool_address, p]));
+      let merged = 0;
+      for (const tr of trendingResults) {
+        if (tr.pool && tr.pool.pool_address && !byPool.has(tr.pool.pool_address)) {
+          byPool.set(tr.pool.pool_address, tr.pool);
+          merged++;
+        }
+      }
+      if (merged > 0) {
+        rawPools = Array.from(byPool.values());
+        log("screening", `Trending discovery: merged ${merged} new GMGN trending pools (${trendingResults.length} total trending, ${rawPools.length} total pools)`);
+      } else {
+        log("screening", `Trending discovery: all ${trendingResults.length} trending tokens already in pool list`);
+      }
+    }
+  }
+
+  // Smart wallet tracked pools — pools where tracked LP wallets are deployed
+  {
+    const { getAllTrackedPools } = await import("../smart-wallets.js");
+    const tracked = await getAllTrackedPools().catch((err) => {
+      log("screening", `Smart wallet tracked pools failed: ${err.message}`);
+      return [];
+    });
+    if (tracked.length > 0) {
+      const byPool = new Map(rawPools.map((p) => [p.pool_address, p]));
+      let merged = 0;
+      for (const tp of tracked) {
+        if (!byPool.has(tp.pool_address)) {
+          byPool.set(tp.pool_address, { ...tp.pool, _smart_wallet_tracked: true, _tracked_by: tp.tracked_by });
+          merged++;
+        } else {
+          // Tag existing pool with smart wallet metadata
+          const existing = byPool.get(tp.pool_address);
+          existing._smart_wallet_tracked = true;
+          existing._tracked_by = tp.tracked_by;
+        }
+      }
+      rawPools = Array.from(byPool.values());
+      if (merged > 0) {
+        const totalTracked = tracked.filter((t) => !rawPools.some((p) => p.pool_address === t.pool_address) || true).length;
+        log("screening", `Smart wallet tracked: merged ${merged} new pools, tagged ${tracked.length - merged} existing pools (${rawPools.length} total pools)`);
+      } else {
+        log("screening", `Smart wallet tracked: all ${tracked.length} pools already in discovery list — metadata tagged`);
+      }
+    }
+  }
+
   rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
   await enrichDiscordSignalLaunchpads(rawPools);
 
@@ -836,6 +1006,16 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   // GMGN pump check — reject tokens that pumped >maxPumpPct1h% in the last hour
   if (config.screening.pumpCheckEnabled && eligible.length > 0) {
     await pumpCheckFilter(eligible, filteredOut, config.screening.maxPumpPct1h);
+  }
+
+  // GMGN security check — reject rugged / honeypot tokens
+  if (config.screening.securityCheckEnabled && eligible.length > 0) {
+    await securityCheckFilter(eligible, filteredOut);
+  }
+
+  // GMGN holder enrichment — attach top-holder analytics for Smart Money signal
+  if (config.screening.holderCheckEnabled && eligible.length > 0) {
+    await enrichTopHolders(eligible);
   }
 
   if (config.indicators.enabled && eligible.length > 0) {
