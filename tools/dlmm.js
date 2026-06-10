@@ -1541,6 +1541,34 @@ export async function closePosition({ position_address, reason }) {
   try {
     log("close", `Closing position: ${position_address}`);
     const wallet = getWallet();
+
+    // ─── Pre-flight: verify position is actually still open on-chain ───
+    // Prevents "AccountOwnedByWrongProgram" (0xbbf) from race-retry on already-closed positions.
+    try {
+      const preflight = await getMyPositions({ force: true, silent: true });
+      const stillOpen = preflight?.positions?.some((p) => p.position === position_address);
+      if (!stillOpen) {
+        log("close", `Pre-flight: position ${position_address} already closed on-chain — skipping submit`);
+        recordClose(position_address, reason || "agent decision (pre-flight: already closed)");
+        const trackedPool = tracked?.pool || null;
+        const trackedBaseMint = tracked?.base_mint || null;
+        return {
+          success: true,
+          already_closed: true,
+          position: position_address,
+          pool: trackedPool,
+          pool_name: tracked?.pool_name || null,
+          claim_txs: [],
+          close_txs: [],
+          txs: [],
+          base_mint: trackedBaseMint,
+          note: "Position was already closed on-chain. No transaction sent.",
+        };
+      }
+    } catch (preErr) {
+      log("close_warn", `Pre-flight check failed (proceeding anyway): ${preErr.message}`);
+    }
+
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const poolMeta = await getPoolMetadata(poolAddress);
     if (shouldUseLpAgentRelay()) {
@@ -1633,14 +1661,19 @@ export async function closePosition({ position_address, reason }) {
       }
 
       if (!closedConfirmed) {
-        return {
-          success: false,
-          error: "Close submit succeeded but position still appears open after verification window",
-          position: position_address,
-          pool: poolAddress,
-          close_txs: closeTxHashes,
-          txs: txHashes,
-        };
+        if (closeTxHashes.length > 0) {
+          log("close_warn", `Relay verification timed out, but ${closeTxHashes.length} close tx(s) submitted — treating as success and proceeding to auto-sweep`);
+          closedConfirmed = true;
+        } else {
+          return {
+            success: false,
+            error: "Close submit succeeded but position still appears open after verification window",
+            position: position_address,
+            pool: poolAddress,
+            close_txs: closeTxHashes,
+            txs: txHashes,
+          };
+        }
       }
 
       recordClose(position_address, reason || "agent decision");
@@ -1767,7 +1800,7 @@ export async function closePosition({ position_address, reason }) {
         claim_txs: claimTxHashes,
         close_txs: closeTxHashes,
         txs: txHashes,
-        base_mint: livePosition?.base_mint || null,
+        base_mint: livePosition?.base_mint || pool.lbPair.tokenXMint.toString(),
       };
       } catch (relayError) {
         if (relaySubmitted) throw relayError;
@@ -1872,16 +1905,24 @@ export async function closePosition({ position_address, reason }) {
       if (attempt < 3) await new Promise((r) => setTimeout(r, 3000));
     }
 
+    // If close txs are confirmed on-chain (txHashes populated via sendAndConfirmTransaction),
+    // the close DID succeed — Meteora API lag should not block downstream auto-sweep.
+    // Only return failure when both verification AND tx confirmation are missing.
     if (!closedConfirmed) {
-      return {
-        success: false,
-        error: "Close transactions sent but position still appears open after verification window",
-        position: position_address,
-        pool: poolAddress,
-        claim_txs: claimTxHashes,
-        close_txs: closeTxHashes,
-        txs: txHashes,
-      };
+      if (closeTxHashes.length > 0) {
+        log("close_warn", `Verification window timed out, but ${closeTxHashes.length} close tx(s) confirmed on-chain — treating as success and proceeding to auto-sweep`);
+        closedConfirmed = true;
+      } else {
+        return {
+          success: false,
+          error: "Close transactions sent but position still appears open after verification window",
+          position: position_address,
+          pool: poolAddress,
+          claim_txs: claimTxHashes,
+          close_txs: closeTxHashes,
+          txs: txHashes,
+        };
+      }
     }
 
     recordClose(position_address, reason || "agent decision");
@@ -2053,6 +2094,31 @@ export async function closePosition({ position_address, reason }) {
       base_mint: pool.lbPair.tokenXMint.toString(),
     };
   } catch (error) {
+    // Detect "already closed" race signal: simulation fails because the position
+    // account is now owned by System Program (closed) instead of DLMM.
+    const msg = String(error?.message || "");
+    const alreadyClosed =
+      msg.includes("0xbbf") ||
+      msg.includes("AccountOwnedByWrongProgram") ||
+      msg.includes("Error Number: 3007");
+
+    if (alreadyClosed) {
+      log("close", `Detected already-closed signal (0xbbf) for ${position_address} — treating as success`);
+      try { recordClose(position_address, reason || "agent decision (already closed on-chain)"); } catch {}
+      return {
+        success: true,
+        already_closed: true,
+        position: position_address,
+        pool: tracked?.pool || null,
+        pool_name: tracked?.pool_name || null,
+        claim_txs: [],
+        close_txs: [],
+        txs: [],
+        base_mint: tracked?.base_mint || null,
+        note: "Position was already closed on-chain (race retry). No transaction sent.",
+      };
+    }
+
     log("close_error", error.message);
     return { success: false, error: error.message };
   }

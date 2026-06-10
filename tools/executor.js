@@ -739,35 +739,96 @@ export async function executeTool(name, args) {
           const poolAddr = result.pool || args.pool_address;
           if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
         }
-        // Auto-swap base token back to SOL unless user said to hold
-        if (!args.skip_swap && result.base_mint) {
+        // Auto-sweep all leftover non-SOL/USDC tokens back to SOL after close.
+        // This handles: base_mint missing on relay path, multi-pool residue,
+        // partial-fill leftovers, or any prior un-swept dust above threshold.
+        if (!args.skip_swap) {
           try {
+            const SOL_MINT = "So11111111111111111111111111111111111111112";
+            const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+            // Permanent sweep blacklist — never auto-swap these mints (suspected scam / drain risk)
+            const SWAP_BLACKLIST = new Set([
+              "9XHkrup9a1xvRyMMX7UK3QnpPdbnqQCiZZouHFfiTW8T", // user-flagged
+              "7GkZYRecKsmcDM5JoWeYt93v4vBaCZVJPS1ApR1TwA8j", // same "mɔ" symbol family as 9XHk
+            ]);
+            const MIN_SWEEP_USD = 0.20;
+            const MIN_SWEEP_BALANCE_NO_PRICE = 1; // for tokens with null/0 usd, require >1 unit
+            const isSolLike = (m) => typeof m === "string" && m.length >= 32 && m.length <= 44 && m.startsWith("So1");
+
             const balances = await getWalletBalances({});
-            const token = balances.tokens?.find(t => t.mint === result.base_mint);
-            if (token && token.usd >= 0.10) {
-              log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-              // Tell the model the swap already happened so it doesn't call swap_token again
-              result.auto_swapped = true;
-              result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
-              if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+            const allTokens = balances.tokens || [];
+            const sweepable = allTokens.filter(t => {
+              if (!t || !t.mint) return false;
+              if (isSolLike(t.mint)) return false; // skip SOL family (incl. Helius typo "So111...111")
+              if (t.mint === USDC_MINT) return false;
+              if (SWAP_BLACKLIST.has(t.mint)) return false;
+              if (Number(t.balance) <= 0) return false;
+              const usd = Number(t.usd);
+              if (Number.isFinite(usd) && usd > 0) return usd >= MIN_SWEEP_USD;
+              // No price data — fall back to raw balance threshold to avoid worthless dust
+              return Number(t.balance) >= MIN_SWEEP_BALANCE_NO_PRICE;
+            });
+
+            log("executor", `Auto-sweep cycle: ${sweepable.length} candidate(s) from ${allTokens.length} token accounts`);
+
+            // Prioritize the position's base_mint first (so notify reflects the close)
+            sweepable.sort((a, b) => {
+              if (a.mint === result.base_mint) return -1;
+              if (b.mint === result.base_mint) return 1;
+              return (Number(b.usd) || 0) - (Number(a.usd) || 0);
+            });
+
+            const swept = [];
+            for (const tok of sweepable) {
+              try {
+                const usdLabel = Number.isFinite(Number(tok.usd)) && tok.usd > 0 ? `$${Number(tok.usd).toFixed(2)}` : "no-price";
+                log("executor", `Auto-sweep: ${tok.symbol || tok.mint.slice(0, 8)} (${usdLabel}, bal=${tok.balance}) → SOL`);
+                const swapRes = await swapToken({ input_mint: tok.mint, output_mint: SOL_MINT, amount: tok.balance });
+                if (swapRes?.success !== false && swapRes?.tx) {
+                  swept.push({ mint: tok.mint, symbol: tok.symbol, usd: tok.usd, sol_out: swapRes?.amount_out, tx: swapRes.tx });
+                  if (tok.mint === result.base_mint) {
+                    result.auto_swapped = true;
+                    if (swapRes?.amount_out) result.sol_received = swapRes.amount_out;
+                  }
+                } else {
+                  log("executor_warn", `Sweep skipped/failed for ${tok.mint.slice(0, 8)}: ${swapRes?.error || "no tx returned"}`);
+                }
+                await new Promise(r => setTimeout(r, 1500)); // rate-limit between sweeps
+              } catch (swapErr) {
+                log("executor_warn", `Sweep error for ${tok.mint.slice(0, 8)}: ${swapErr.message}`);
+              }
+            }
+            if (swept.length > 0) {
+              result.swept_tokens = swept;
+              result.auto_swap_note = `Auto-swept ${swept.length} token${swept.length > 1 ? "s" : ""} back to SOL. Do NOT call swap_token again.`;
             }
           } catch (e) {
-            log("executor_warn", `Auto-swap after close failed: ${e.message}`);
+            log("executor_warn", `Auto-sweep after close failed: ${e.message}`);
           }
         }
       } else if (name === "claim_fees") {
         if (config.management.autoSwapAfterClaim && result.base_mint) {
           try {
-            const balances = await getWalletBalances({});
-            const token = balances.tokens?.find(t => t.mint === result.base_mint);
-            if (token && token.usd >= 0.10) {
-              log("executor", `Auto-compound: swapping claimed ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL for redeploy`);
-              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-              if (swapResult?.amount_out) {
-                log("executor", `Auto-compound: received ${swapResult.amount_out} SOL — will be used in next screening cycle`);
-                result.auto_compounded = true;
-                result.compound_sol = swapResult.amount_out;
+            const SOL_MINT = "So11111111111111111111111111111111111111112";
+            const SWAP_BLACKLIST = new Set([
+                          "9XHkrup9a1xvRyMMX7UK3QnpPdbnqQCiZZouHFfiTW8T",
+                          "7GkZYRecKsmcDM5JoWeYt93v4vBaCZVJPS1ApR1TwA8j",
+                        ]);
+            if (SWAP_BLACKLIST.has(result.base_mint)) {
+              log("executor_warn", `Auto-compound skipped: base_mint ${result.base_mint} is in swap blacklist`);
+            } else {
+              const balances = await getWalletBalances({});
+              const token = balances.tokens?.find(t => t.mint === result.base_mint);
+              if (token && token.usd >= 0.10) {
+                log("executor", `Auto-compound: swapping claimed ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL for redeploy`);
+                const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: SOL_MINT, amount: token.balance });
+                if (swapResult?.amount_out) {
+                  // amount_out from Jupiter Swap V2 is in lamports for SOL output - convert for display
+                  const solHuman = Number(swapResult.amount_out) / 1e9;
+                  log("executor", `Auto-compound: received ${solHuman.toFixed(6)} SOL — will be used in next screening cycle`);
+                  result.auto_compounded = true;
+                  result.compound_sol = solHuman;
+                }
               }
             }
           } catch (e) {
@@ -963,6 +1024,32 @@ async function runSafetyChecks(name, args) {
       // via token narratives, pool names, or other untrusted data.
       const SOL_MINT = "So11111111111111111111111111111111111111112";
       const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+      // Normalize SOL-like typos (e.g. "So111...111" with 1 trailing 1 instead of 2)
+      // before whitelist check, so LLM mistakes don't block legitimate swaps to SOL.
+      const normalizeSolLike = (m) => {
+        if (!m) return m;
+        if (m === "SOL" || m === "native") return SOL_MINT;
+        if (typeof m === "string" && m.length >= 32 && m.length <= 44 && m.startsWith("So1") && m !== SOL_MINT) {
+          return SOL_MINT;
+        }
+        return m;
+      };
+      args.input_mint = normalizeSolLike(args.input_mint);
+      args.output_mint = normalizeSolLike(args.output_mint);
+
+      // Permanent sweep blacklist — refuse to interact with these mints at all
+      const SWAP_BLACKLIST = new Set([
+                    "9XHkrup9a1xvRyMMX7UK3QnpPdbnqQCiZZouHFfiTW8T",
+                    "7GkZYRecKsmcDM5JoWeYt93v4vBaCZVJPS1ApR1TwA8j",
+                  ]);
+      if (SWAP_BLACKLIST.has(args.input_mint) || SWAP_BLACKLIST.has(args.output_mint)) {
+        return {
+          pass: false,
+          reason: `Mint ${args.input_mint} or ${args.output_mint} is in the permanent swap blacklist (suspected scam/drain).`,
+        };
+      }
+
       const allowedOut = new Set([SOL_MINT, USDC]);
       if (!allowedOut.has(args.output_mint) && args.input_mint !== SOL_MINT) {
         return {
