@@ -56,6 +56,61 @@ function getVolatilityTimeframe(sourceTimeframe) {
   return sourceMinutes != null && sourceMinutes >= minMinutes ? source : MIN_VOLATILITY_TIMEFRAME;
 }
 
+// Split one token's full balance: usdcPct% -> USDC (parked realized profit, not
+// redeployed), remainder -> SOL (compounded for next screening cycle). Each leg
+// has its own try/catch so one failing does not block the other. A dust-floor
+// guard redirects a too-small USDC leg fully to SOL to avoid Jupiter
+// "Failed to get quotes" on tiny amounts. Callers must pre-filter blacklist/SOL/USDC.
+// Returns { parked_usdc, compound_sol, usdc_tx, sol_tx, did_swap }.
+async function splitSweepToken(tok, usdcPct) {
+  const SOL_MINT = "So11111111111111111111111111111111111111112";
+  const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+  const out = { parked_usdc: 0, compound_sol: 0, usdc_tx: null, sol_tx: null, did_swap: false };
+  const total = Number(tok.balance);
+  if (!(total > 0)) return out;
+  const pct = Math.max(0, Math.min(100, Number(usdcPct) || 0));
+  let usdcAmount = pct > 0 ? total * (pct / 100) : 0;
+  // Redirect dust-sized USDC leg to SOL (Jupiter rejects tiny quotes)
+  const dustFloor = total * 0.005;
+  if (usdcAmount > 0 && usdcAmount < dustFloor) {
+    log("executor_warn", `Split: USDC leg too small for ${tok.symbol || tok.mint.slice(0, 8)} (${usdcAmount}), redirecting to SOL`);
+    usdcAmount = 0;
+  }
+  const solAmount = total - usdcAmount;
+  // SWAP 1: token -> USDC (parked, USDC output is 1e6 units)
+  if (usdcAmount > 0) {
+    try {
+      const r = await swapToken({ input_mint: tok.mint, output_mint: USDC_MINT, amount: usdcAmount });
+      if (r?.success !== false && (r?.amount_out || r?.tx)) {
+        out.did_swap = true;
+        out.usdc_tx = r.tx || null;
+        if (r?.amount_out) out.parked_usdc = Number(r.amount_out) / 1e6;
+      } else {
+        log("executor_warn", `Split USDC swap skipped/failed for ${tok.mint.slice(0, 8)}: ${r?.error || "no tx returned"}`);
+      }
+    } catch (e) {
+      log("executor_warn", `Split USDC swap error for ${tok.mint.slice(0, 8)}: ${e.message}`);
+    }
+    await new Promise(r => setTimeout(r, 1200)); // rate-limit between legs
+  }
+  // SWAP 2: token -> SOL (compounded, SOL output is lamports 1e9)
+  if (solAmount > 0) {
+    try {
+      const r = await swapToken({ input_mint: tok.mint, output_mint: SOL_MINT, amount: solAmount });
+      if (r?.success !== false && (r?.amount_out || r?.tx)) {
+        out.did_swap = true;
+        out.sol_tx = r.tx || null;
+        if (r?.amount_out) out.compound_sol = Number(r.amount_out) / 1e9;
+      } else {
+        log("executor_warn", `Split SOL swap skipped/failed for ${tok.mint.slice(0, 8)}: ${r?.error || "no tx returned"}`);
+      }
+    } catch (e) {
+      log("executor_warn", `Split SOL swap error for ${tok.mint.slice(0, 8)}: ${e.message}`);
+    }
+  }
+  return out;
+}
+
 function poolDetailTvl(pool) {
   return numberOrNull(pool?.tvl ?? pool?.active_tvl ?? pool?.liquidity);
 }
@@ -473,6 +528,7 @@ const toolMap = {
       // management
       minClaimAmount: ["management", "minClaimAmount"],
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
+      feeSplitUsdcPct: ["management", "feeSplitUsdcPct"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
@@ -752,6 +808,7 @@ export async function executeTool(name, args) {
               "7GkZYRecKsmcDM5JoWeYt93v4vBaCZVJPS1ApR1TwA8j", // same "mɔ" symbol family as 9XHk
               "HLnW6TCUsJuwBbWCX4YfuhrZJ9ZJMQHL4yZPfn7EFx2S", // "mɔ" family — no Jupiter route (Failed to get quotes)
               "H8VmPPULshXk3Dr9Gw8Uy6b2p6ccvbnhrNEGM8wj6Msh", // "mɔ" family — no Jupiter route
+              "23xZrAXQTRLsuH5KXyv3CiEHmWLL2vKbG6C9PpGHARVY", // $HARVY — user hold, never sell
             ]);
             const MIN_SWEEP_USD = 0.20;
             const MIN_SWEEP_BALANCE_NO_PRICE = 1; // for tokens with null/0 usd, require >1 unit
@@ -771,7 +828,10 @@ export async function executeTool(name, args) {
               return Number(t.balance) >= MIN_SWEEP_BALANCE_NO_PRICE;
             });
 
-            log("executor", `Auto-sweep cycle: ${sweepable.length} candidate(s) from ${allTokens.length} token accounts`);
+            // Split ratio: usdcPct% of each swept token -> USDC (parked), rest -> SOL
+            const usdcPct = Math.max(0, Math.min(100, Number(config.management.feeSplitUsdcPct ?? 40)));
+
+            log("executor", `Auto-sweep cycle: ${sweepable.length} candidate(s) from ${allTokens.length} token accounts → ${usdcPct}% USDC / ${100 - usdcPct}% SOL`);
 
             // Prioritize the position's base_mint first (so notify reflects the close)
             sweepable.sort((a, b) => {
@@ -784,16 +844,18 @@ export async function executeTool(name, args) {
             for (const tok of sweepable) {
               try {
                 const usdLabel = Number.isFinite(Number(tok.usd)) && tok.usd > 0 ? `$${Number(tok.usd).toFixed(2)}` : "no-price";
-                log("executor", `Auto-sweep: ${tok.symbol || tok.mint.slice(0, 8)} (${usdLabel}, bal=${tok.balance}) → SOL`);
-                const swapRes = await swapToken({ input_mint: tok.mint, output_mint: SOL_MINT, amount: tok.balance });
-                if (swapRes?.success !== false && swapRes?.tx) {
-                  swept.push({ mint: tok.mint, symbol: tok.symbol, usd: tok.usd, sol_out: swapRes?.amount_out, tx: swapRes.tx });
+                log("executor", `Auto-sweep split: ${tok.symbol || tok.mint.slice(0, 8)} (${usdLabel}, bal=${tok.balance}) → ${usdcPct}% USDC / ${100 - usdcPct}% SOL`);
+                const res = await splitSweepToken(tok, usdcPct);
+                if (res.did_swap) {
+                  swept.push({ mint: tok.mint, symbol: tok.symbol, usd: tok.usd, parked_usdc: res.parked_usdc, sol_out: res.compound_sol, usdc_tx: res.usdc_tx, tx: res.sol_tx });
+                  if (res.parked_usdc > 0) log("executor", `Auto-sweep: parked ${res.parked_usdc.toFixed(2)} USDC`);
+                  if (res.compound_sol > 0) log("executor", `Auto-sweep: received ${res.compound_sol.toFixed(6)} SOL`);
                   if (tok.mint === result.base_mint) {
                     result.auto_swapped = true;
-                    if (swapRes?.amount_out) result.sol_received = swapRes.amount_out;
+                    if (res.compound_sol) result.sol_received = res.compound_sol;
                   }
                 } else {
-                  log("executor_warn", `Sweep skipped/failed for ${tok.mint.slice(0, 8)}: ${swapRes?.error || "no tx returned"}`);
+                  log("executor_warn", `Sweep skipped/failed for ${tok.mint.slice(0, 8)}`);
                 }
                 await new Promise(r => setTimeout(r, 1500)); // rate-limit between sweeps
               } catch (swapErr) {
@@ -801,78 +863,81 @@ export async function executeTool(name, args) {
               }
             }
             if (swept.length > 0) {
+              const totalParked = swept.reduce((s, x) => s + (Number(x.parked_usdc) || 0), 0);
               result.swept_tokens = swept;
-              result.auto_swap_note = `Auto-swept ${swept.length} token${swept.length > 1 ? "s" : ""} back to SOL. Do NOT call swap_token again.`;
+              if (totalParked > 0) result.parked_usdc = totalParked;
+              result.auto_swap_note = `Auto-swept ${swept.length} token${swept.length > 1 ? "s" : ""} → ${usdcPct}% USDC parked (${totalParked.toFixed(2)} USDC) / ${100 - usdcPct}% SOL. Do NOT call swap_token again.`;
             }
           } catch (e) {
             log("executor_warn", `Auto-sweep after close failed: ${e.message}`);
           }
         }
       } else if (name === "claim_fees") {
-        if (config.management.autoSwapAfterClaim && result.base_mint) {
+        // Auto-compound claimed fees: split every non-SOL/USDC token in the wallet
+        // usdcPct% -> USDC (parked) / rest -> SOL (compounded). Not gated on
+        // result.base_mint (often unpopulated on the relay path) — sweep-all mirrors
+        // the close handler so the split reliably fires, and auto_swap_note stops the
+        // LLM from doing its own 100%-SOL swap_token afterwards.
+        if (config.management.autoSwapAfterClaim) {
           try {
-            const SOL_MINT = "So11111111111111111111111111111111111111112";
             const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-            const rawPct = config.management.feeSplitUsdcPct ?? 40;
-            const usdcPct = Math.max(0, Math.min(100, Number(rawPct) || 0));
             const SWAP_BLACKLIST = new Set([
-                          "9XHkrup9a1xvRyMMX7UK3QnpPdbnqQCiZZouHFfiTW8T",
-                          "7GkZYRecKsmcDM5JoWeYt93v4vBaCZVJPS1ApR1TwA8j",
-                          "HLnW6TCUsJuwBbWCX4YfuhrZJ9ZJMQHL4yZPfn7EFx2S",
-                          "H8VmPPULshXk3Dr9Gw8Uy6b2p6ccvbnhrNEGM8wj6Msh",
-                        ]);
-            if (SWAP_BLACKLIST.has(result.base_mint)) {
-              log("executor_warn", `Auto-compound skipped: base_mint ${result.base_mint} is in swap blacklist`);
-            } else {
-              const balances = await getWalletBalances({});
-              const token = balances.tokens?.find(t => t.mint === result.base_mint);
-              if (token && token.usd >= 0.10) {
-                const symbol = token.symbol || result.base_mint.slice(0, 8);
-                const totalAmount = token.balance;
-                let usdcAmount = usdcPct > 0 ? totalAmount * (usdcPct / 100) : 0;
-                // Skip dust-sized USDC swap (Jupiter quote errors); redirect to SOL instead
-                const dustFloor = totalAmount * 0.005;
-                if (usdcAmount > 0 && usdcAmount < dustFloor) {
-                  log("executor_warn", `Auto-compound: USDC split amount too small (${usdcAmount}), redirecting full amount to SOL`);
-                  usdcAmount = 0;
-                }
-                const solAmount = totalAmount - usdcAmount;
-                log("executor", `Auto-compound: splitting claimed ${symbol} ($${token.usd.toFixed(2)}) → ${usdcPct}% USDC (parked) / ${100 - usdcPct}% SOL (redeploy)`);
+              "9XHkrup9a1xvRyMMX7UK3QnpPdbnqQCiZZouHFfiTW8T", // user-flagged
+              "7GkZYRecKsmcDM5JoWeYt93v4vBaCZVJPS1ApR1TwA8j", // "mɔ" family
+              "HLnW6TCUsJuwBbWCX4YfuhrZJ9ZJMQHL4yZPfn7EFx2S", // "mɔ" family — no Jupiter route
+              "H8VmPPULshXk3Dr9Gw8Uy6b2p6ccvbnhrNEGM8wj6Msh", // "mɔ" family — no Jupiter route
+              "23xZrAXQTRLsuH5KXyv3CiEHmWLL2vKbG6C9PpGHARVY", // $HARVY — user hold, never sell
+            ]);
+            const MIN_SWEEP_USD = 0.20;
+            const MIN_SWEEP_BALANCE_NO_PRICE = 1;
+            const isSolLike = (m) => typeof m === "string" && m.length >= 32 && m.length <= 44 && m.startsWith("So1");
+            const usdcPct = Math.max(0, Math.min(100, Number(config.management.feeSplitUsdcPct ?? 40)));
 
-                // SWAP 1: base token → USDC (parked realized profit, not redeployed)
-                if (usdcAmount > 0) {
-                  try {
-                    const usdcSwap = await swapToken({ input_mint: result.base_mint, output_mint: USDC_MINT, amount: usdcAmount });
-                    if (usdcSwap?.amount_out) {
-                      // USDC output is in 1e6 units
-                      const usdcHuman = Number(usdcSwap.amount_out) / 1e6;
-                      log("executor", `Auto-compound: parked ${usdcHuman.toFixed(2)} USDC`);
-                      result.parked_usdc = usdcHuman;
-                      result.auto_compounded = true;
-                    }
-                  } catch (e) {
-                    log("executor_warn", `Auto-compound USDC swap failed: ${e.message}`);
-                    result.parked_usdc = 0;
-                  }
-                }
+            const balances = await getWalletBalances({});
+            const allTokens = balances.tokens || [];
+            const sweepable = allTokens.filter(t => {
+              if (!t || !t.mint) return false;
+              if (isSolLike(t.mint)) return false;
+              if (t.mint === USDC_MINT) return false;
+              if (SWAP_BLACKLIST.has(t.mint)) return false;
+              if (Number(t.balance) <= 0) return false;
+              const usd = Number(t.usd);
+              if (Number.isFinite(usd) && usd > 0) return usd >= MIN_SWEEP_USD;
+              return Number(t.balance) >= MIN_SWEEP_BALANCE_NO_PRICE;
+            });
+            // Prioritize the claimed position's base_mint first
+            sweepable.sort((a, b) => {
+              if (a.mint === result.base_mint) return -1;
+              if (b.mint === result.base_mint) return 1;
+              return (Number(b.usd) || 0) - (Number(a.usd) || 0);
+            });
 
-                // SWAP 2: base token → SOL (compounded for next screening cycle)
-                if (solAmount > 0) {
-                  try {
-                    const solSwap = await swapToken({ input_mint: result.base_mint, output_mint: SOL_MINT, amount: solAmount });
-                    if (solSwap?.amount_out) {
-                      // SOL output is in lamports (1e9)
-                      const solHuman = Number(solSwap.amount_out) / 1e9;
-                      log("executor", `Auto-compound: received ${solHuman.toFixed(6)} SOL — will be used in next screening cycle`);
-                      result.compound_sol = solHuman;
-                      result.auto_compounded = true;
-                    }
-                  } catch (e) {
-                    log("executor_warn", `Auto-compound SOL swap failed: ${e.message}`);
-                    result.compound_sol = 0;
-                  }
+            log("executor", `Auto-compound: ${sweepable.length} claimed token(s) to split → ${usdcPct}% USDC / ${100 - usdcPct}% SOL`);
+
+            const swept = [];
+            for (const tok of sweepable) {
+              try {
+                const symbol = tok.symbol || tok.mint.slice(0, 8);
+                const usdLabel = Number.isFinite(Number(tok.usd)) && tok.usd > 0 ? `$${Number(tok.usd).toFixed(2)}` : "no-price";
+                log("executor", `Auto-compound: splitting claimed ${symbol} (${usdLabel}, bal=${tok.balance})`);
+                const res = await splitSweepToken(tok, usdcPct);
+                if (res.did_swap) {
+                  swept.push({ mint: tok.mint, symbol: tok.symbol, parked_usdc: res.parked_usdc, compound_sol: res.compound_sol });
+                  if (res.parked_usdc > 0) log("executor", `Auto-compound: parked ${res.parked_usdc.toFixed(2)} USDC`);
+                  if (res.compound_sol > 0) log("executor", `Auto-compound: received ${res.compound_sol.toFixed(6)} SOL — next screening cycle`);
+                  result.auto_compounded = true;
                 }
+                await new Promise(r => setTimeout(r, 1500)); // rate-limit between sweeps
+              } catch (e) {
+                log("executor_warn", `Auto-compound error for ${tok.mint.slice(0, 8)}: ${e.message}`);
               }
+            }
+            if (swept.length > 0) {
+              const totalParked = swept.reduce((s, x) => s + (Number(x.parked_usdc) || 0), 0);
+              const totalSol = swept.reduce((s, x) => s + (Number(x.compound_sol) || 0), 0);
+              if (totalParked > 0) result.parked_usdc = totalParked;
+              if (totalSol > 0) result.compound_sol = totalSol;
+              result.auto_swap_note = `Claimed fees auto-split → ${totalParked.toFixed(2)} USDC parked / ${totalSol.toFixed(6)} SOL. Do NOT call swap_token again.`;
             }
           } catch (e) {
             log("executor_warn", `Auto-swap after claim failed: ${e.message}`);
@@ -1087,6 +1152,7 @@ async function runSafetyChecks(name, args) {
                     "7GkZYRecKsmcDM5JoWeYt93v4vBaCZVJPS1ApR1TwA8j",
                     "HLnW6TCUsJuwBbWCX4YfuhrZJ9ZJMQHL4yZPfn7EFx2S",
                     "H8VmPPULshXk3Dr9Gw8Uy6b2p6ccvbnhrNEGM8wj6Msh",
+                    "23xZrAXQTRLsuH5KXyv3CiEHmWLL2vKbG6C9PpGHARVY",
                   ]);
       if (SWAP_BLACKLIST.has(args.input_mint) || SWAP_BLACKLIST.has(args.output_mint)) {
         return {

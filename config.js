@@ -168,6 +168,7 @@ export const config = {
     trailingDropPct:       management.trailingDropPct       ?? 1.5,
     pnlSanityMaxDiffPct:   management.pnlSanityMaxDiffPct   ?? 5,
     solMode:               management.solMode               ?? false,
+    feeSplitUsdcPct:       management.feeSplitUsdcPct       ?? 40,
   },
 
   // ─── Strategy Mapping ───────────────────
