@@ -1,56 +1,86 @@
 /**
  * GMGN API client — meme token analytics
  * Base: https://openapi.gmgn.ai
- * Auth: X-APIKEY header (read-only)
+ * Auth (2026 scheme): X-APIKEY header + per-request query params
+ *   `timestamp` (unix seconds) and `client_id` (random UUID, anti-replay:
+ *   a UUID cannot be reused within 7s per API key).
+ * Key comes from env GMGN_API_KEY (.env) — never hardcode it here.
  * Rate limit: leaky-bucket 20 req/s
  */
+import { randomUUID } from "node:crypto";
 import { log } from "../logger.js";
 
 const BASE = "https://openapi.gmgn.ai";
-const API_KEY = process.env.GMGN_API_KEY || "gmgn_2aeb1f71da4b0edc80e6e3e4b85158ff";
+let _warnedNoKey = false;
 
 async function gmgnFetch(path) {
-  const url = `${BASE}${path}`;
+  const apiKey = process.env.GMGN_API_KEY || "";
+  if (!apiKey) {
+    if (!_warnedNoKey) {
+      _warnedNoKey = true;
+      log("gmgn", "GMGN_API_KEY not set — all GMGN checks are no-ops (fail-open)");
+    }
+    return null;
+  }
+  const sep = path.includes("?") ? "&" : "?";
+  const url = `${BASE}${path}${sep}timestamp=${Math.floor(Date.now() / 1000)}&client_id=${randomUUID()}`;
   try {
     const res = await fetch(url, {
-      headers: { "X-APIKEY": API_KEY, "Accept": "application/json" },
+      headers: { "X-APIKEY": apiKey, "Accept": "application/json" },
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return null;
     const json = await res.json();
     if (json.code !== 0) return null;
-    return json.data ?? null;
+    let data = json.data ?? null;
+    // Some endpoints (e.g. market/rank) double-wrap the payload: {code,data:{code,data:{...}}}
+    if (data && typeof data === "object" && "code" in data && "data" in data) {
+      if (data.code !== 0) return null;
+      data = data.data ?? null;
+    }
+    return data;
   } catch {
     return null;
   }
 }
 
 /**
- * Get token info with price change percentages.
- * Weight: 1. Returns: { price, price_change_1m, 5m, 1h, 6h, 24h, ... }
+ * Get token info. New shape nests prices under `data.price`:
+ * { price: { price, price_1m, price_5m, price_1h, ... volume_1h, buys_1h, sells_1h }, holder_count, liquidity, ... }
  */
 export async function getTokenInfo(mint) {
   if (!mint) return null;
-  return gmgnFetch(`/v1/token/info?contract_address=${encodeURIComponent(mint)}`);
+  return gmgnFetch(`/v1/token/info?chain=sol&address=${encodeURIComponent(mint)}`);
 }
 
 /**
  * Fetch OHLCV kline/candles data.
- * Weight: 2. Params: resolution (1m/5m/15m/1h/4h/1d), count (max 200).
+ * Params: resolution (1m/5m/15m/1h/4h/1d). `count` is no longer supported by the API.
  * Returns: array of { time, open, high, low, close, volume }
  */
-export async function getTokenKline(mint, { resolution = "15m", count = 20 } = {}) {
+export async function getTokenKline(mint, { resolution = "15m" } = {}) {
   if (!mint) return null;
-  return gmgnFetch(`/v1/token/kline?contract_address=${encodeURIComponent(mint)}&resolution=${resolution}&count=${count}`);
+  return gmgnFetch(`/v1/market/token_kline?chain=sol&address=${encodeURIComponent(mint)}&resolution=${resolution}`);
 }
 
 /**
  * Security / rug check.
- * Weight: 1. Returns: { rugged, honeypot, ... }
+ * New shape: { honeypot: 0|1, is_honeypot, blacklist: 0|1, is_blacklist, flags: [], ... } — no `rugged` field.
  */
 export async function getTokenSecurity(mint) {
   if (!mint) return null;
-  return gmgnFetch(`/v1/token/security?contract_address=${encodeURIComponent(mint)}`);
+  return gmgnFetch(`/v1/token/security?chain=sol&address=${encodeURIComponent(mint)}`);
+}
+
+/**
+ * 1h price change in percent, derived from token info (price vs price_1h).
+ * Returns null when data is unavailable.
+ */
+function pctChange1h(info) {
+  const now = Number(info?.price?.price);
+  const ago = Number(info?.price?.price_1h);
+  if (!Number.isFinite(now) || !Number.isFinite(ago) || ago <= 0) return null;
+  return (now / ago - 1) * 100;
 }
 
 /**
@@ -61,8 +91,8 @@ export async function isPumped(mint, maxPumpPct1h) {
   if (!mint || maxPumpPct1h == null) return false;
   const info = await getTokenInfo(mint);
   if (!info) return false; // no data — don't block
-  const pct = Number(info.price_change_1h);
-  if (!Number.isFinite(pct)) return false;
+  const pct = pctChange1h(info);
+  if (pct == null) return false;
   return pct > maxPumpPct1h;
 }
 
@@ -80,9 +110,9 @@ export async function pumpCheckFilter(candidates, filteredOut, maxPumpPct1h) {
       if (!p.base?.mint) return { pool: p, mint: null, pumped: false };
       const info = await getTokenInfo(p.base.mint);
       if (!info) return { pool: p, mint: p.base.mint, pumped: false, pct: null };
-      const pct = Number(info.price_change_1h);
-      const pumped = Number.isFinite(pct) && pct > maxPumpPct1h;
-      return { pool: p, mint: p.base.mint, pumped, pct: Number.isFinite(pct) ? pct : null };
+      const pct = pctChange1h(info);
+      const pumped = pct != null && pct > maxPumpPct1h;
+      return { pool: p, mint: p.base.mint, pumped, pct: pct != null ? parseFloat(pct.toFixed(2)) : null };
     })
   );
 
@@ -105,24 +135,27 @@ export async function pumpCheckFilter(candidates, filteredOut, maxPumpPct1h) {
 
 /**
  * Fetch top holders for a token.
- * Weight: 5. Returns array of holder objects with wallet tags, percentages, PnL.
+ * New shape wraps the array in { list: [...] } — unwrapped here so callers keep getting an array.
  */
 export async function getTokenTopHolders(mint, { limit = 50 } = {}) {
   if (!mint) return null;
-  return gmgnFetch(`/v1/market/token_top_holders?chain=sol&address=${encodeURIComponent(mint)}&limit=${limit}`);
+  const data = await gmgnFetch(`/v1/market/token_top_holders?chain=sol&address=${encodeURIComponent(mint)}&limit=${limit}`);
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.list)) return data.list;
+  return null;
 }
 
 /**
  * Fetch trending tokens by swap activity.
- * Weight: 1. Returns data.rank[] with price, volume, smart_degen_count, rug_ratio, etc.
+ * Returns { rank: [...] } (double-wrap unwrapped in gmgnFetch).
  */
 export async function getMarketRanking({ interval = "1h", limit = 50 } = {}) {
   return gmgnFetch(`/v1/market/rank?chain=sol&interval=${interval}&limit=${limit}`);
 }
 
 /**
- * Security filter: rejects tokens flagged as rugged or honeypot.
- * Uses existing getTokenSecurity() wrapper.
+ * Security filter: rejects tokens flagged as honeypot / blacklisted / rug-flagged.
+ * Uses existing getTokenSecurity() wrapper (new field names).
  */
 export async function securityCheckFilter(candidates, filteredOut) {
   if (!candidates.length) return;
@@ -134,15 +167,20 @@ export async function securityCheckFilter(candidates, filteredOut) {
       if (!p.base?.mint) return { pool: p, pass: true };
       const sec = await getTokenSecurity(p.base.mint);
       if (!sec) return { pool: p, pass: true }; // no data — don't block
-      const blocked = sec.rugged || sec.honeypot;
-      return { pool: p, pass: !blocked, rugged: sec.rugged, honeypot: sec.honeypot };
+      const honeypot = sec.honeypot === 1 || sec.is_honeypot === true;
+      const rugged =
+        sec.blacklist === 1 ||
+        sec.is_blacklist === true ||
+        (Array.isArray(sec.flags) && sec.flags.some((f) => /rug/i.test(String(f))));
+      const blocked = honeypot || rugged;
+      return { pool: p, pass: !blocked, rugged, honeypot };
     })
   );
 
   const kept = [];
   for (const r of results) {
     if (!r.pass) {
-      const reason = [r.rugged && "rugged", r.honeypot && "honeypot"].filter(Boolean).join(" + ");
+      const reason = [r.rugged && "rugged/blacklist", r.honeypot && "honeypot"].filter(Boolean).join(" + ");
       log("gmgn", `Security filter: dropped ${r.pool.name || r.pool.base?.mint?.slice(0, 8)} — ${reason}`);
       if (Array.isArray(filteredOut)) filteredOut.push({ pool: r.pool.name, reason: `GMGN security: ${reason}` });
     } else {
