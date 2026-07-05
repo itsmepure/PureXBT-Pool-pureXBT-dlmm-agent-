@@ -151,6 +151,8 @@ export const config = {
     chaseOorUpMinutes:  management.chaseOorUpMinutes  ?? 5,
     maxChasesPerPool:   management.maxChasesPerPool   ?? 2,
     chaseWindowHours:   management.chaseWindowHours   ?? 6,
+    poolCooldownEnabled: management.poolCooldownEnabled ?? true,  /* __NOCOOLDOWN__ */
+    blacklistOnStopLoss: management.blacklistOnStopLoss ?? false,
     oorCooldownTriggerCount: management.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       management.oorCooldownHours       ?? 12,
     repeatDeployCooldownEnabled: management.repeatDeployCooldownEnabled ?? true,
@@ -171,6 +173,9 @@ export const config = {
     trailingTakeProfit:    management.trailingTakeProfit    ?? true,
     trailingTriggerPct:    management.trailingTriggerPct    ?? 3,
     trailingDropPct:       management.trailingDropPct       ?? 1.5,
+    breakevenTriggerPct:  management.breakevenTriggerPct  ?? null,
+    breakevenFloorPct:    management.breakevenFloorPct    ?? 0,
+    ratchetTiers:         management.ratchetTiers         ?? null,
     pnlSanityMaxDiffPct:   management.pnlSanityMaxDiffPct   ?? 5,
     solMode:               management.solMode               ?? false,
     feeSplitUsdcPct:       management.feeSplitUsdcPct       ?? 40,
@@ -274,6 +279,8 @@ export const config = {
     rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
     requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
   },
+
+  momentum: u.momentum ?? { enabled: false },
 };
 
 /**

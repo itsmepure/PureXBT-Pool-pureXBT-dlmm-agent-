@@ -105,7 +105,7 @@ export function markPoolClosed(poolAddress, { reason, cooldownHours = 2, base_mi
   // Set cooldown to prevent immediate re-deploy
   const _chasePending = entry.chase_pending_until && Date.now() < Number(entry.chase_pending_until); /* __CHASEUP__ */
   if (_chasePending) log("pool-memory", `Chase pending — skip cooldown for ${entry.name}`);
-  if (!_chasePending && cooldownHours > 0) {
+  if (!_chasePending && config.management.poolCooldownEnabled !== false && cooldownHours > 0) {
     const mint = base_mint || entry.base_mint;
     setPoolCooldown(entry, cooldownHours, reason || "externally_closed");
     if (mint) setBaseMintCooldown(db, mint, cooldownHours, reason || "externally_closed");
@@ -139,6 +139,7 @@ function isFeeGeneratingDeploy(deploy) {
 }
 
 function setPoolCooldown(entry, hours, reason) {
+  if (config.management.poolCooldownEnabled === false) return null; /* __NOCOOLDOWN__ */
   const cooldownUntil = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
   entry.cooldown_until = cooldownUntil;
   entry.cooldown_reason = reason;
@@ -146,6 +147,7 @@ function setPoolCooldown(entry, hours, reason) {
 }
 
 function setBaseMintCooldown(db, baseMint, hours, reason) {
+  if (config.management.poolCooldownEnabled === false) return null;
   if (!baseMint) return null;
   const cooldownUntil = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
   for (const entry of Object.values(db)) {
@@ -240,6 +242,21 @@ export function recordPoolDeploy(poolAddress, deployData) {
     entry.base_mint = deployData.base_mint;
   }
 
+  // Auto-blacklist token yang nyeret PnL sampai stop-loss (request user, B pilot)
+  if (config.management.blacklistOnStopLoss === true && entry.base_mint) {
+    try {
+      const _r = String(deploy.close_reason || "").toLowerCase();
+      const _sl = Number(config.management.stopLossPct ?? -100);
+      const _hitSl = /stop[\s_-]?loss|rule 1/.test(_r) || (deploy.pnl_pct != null && _sl < 0 && deploy.pnl_pct <= _sl);
+      if (_hitSl) {
+        const _mint = entry.base_mint, _sym = (entry.name || "").split("-")[0], _pnl = deploy.pnl_pct, _nm = entry.name;
+        import("./token-blacklist.js").then(({ addToBlacklist }) => {
+          addToBlacklist({ mint: _mint, symbol: _sym, reason: `auto: stop-loss ${_pnl}% on ${_nm}` });
+          log("pool-memory", `BLACKLIST otomatis: ${_nm} (${String(_mint).slice(0, 8)}) — stop-loss ${_pnl}%`);
+        }).catch((e) => log("pool-memory", `auto-blacklist gagal: ${e.message}`));
+      }
+    } catch (e) { log("pool-memory", `auto-blacklist gagal: ${e.message}`); }
+  }
   // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon
   if (deploy.close_reason === "low yield") {
     const cooldownHours = 4;
@@ -296,6 +313,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
 
 export function isPoolOnCooldown(poolAddress) {
   if (!poolAddress) return false;
+  if (config.management.poolCooldownEnabled === false) return false;
   const db = load();
   const entry = db[poolAddress];
   if (!entry?.cooldown_until) return false;
@@ -304,6 +322,7 @@ export function isPoolOnCooldown(poolAddress) {
 
 export function isBaseMintOnCooldown(baseMint) {
   if (!baseMint) return false;
+  if (config.management.poolCooldownEnabled === false) return false;
   const db = load();
   const now = new Date();
   return Object.values(db).some((entry) =>
@@ -489,7 +508,7 @@ export function poolNameFromMemory(poolAddress) {
   try { return load()[poolAddress]?.name || null; } catch { return null; }
 }
 
-/* __CHASEUP__ chase-up bookkeeping */
+/* __CHASEUP__ chase-up bookkeeping (pilot Agent B) */
 export function recordChase(poolAddress) {
   if (!poolAddress) return;
   const db = load();
@@ -497,7 +516,7 @@ export function recordChase(poolAddress) {
   if (!entry) return;
   entry.chase_history = (entry.chase_history || []).filter((t) => Date.now() - t < 48 * 3600 * 1000);
   entry.chase_history.push(Date.now());
-  entry.chase_pending_until = Date.now() + 10 * 60 * 1000;
+  entry.chase_pending_until = Date.now() + 10 * 60 * 1000; // 10 menit: markPoolClosed skip cooldown
   save(db);
 }
 export function chaseCountInWindow(poolAddress, hours) {
