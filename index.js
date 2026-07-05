@@ -129,7 +129,7 @@ let _screeningLastTriggered = 0; // epoch ms — prevents management from spammi
 let _pollTriggeredAt = 0;
 /* __CHASEUP__ chase-up OOR-atas */
 import { recordChase, chaseCountInWindow } from "./pool-memory.js";
-import { notifyChase } from "./telegram.js";
+import { notifyChase, notifyChaseResult } from "./telegram.js"; /* __CHASERESULT__ */
 const _chaseOorUpSince = new Map();
 const _chaseDispatched = new Set(); // epoch ms — cooldown for poller-triggered management
 const _peakConfirmTimers = new Map();
@@ -967,12 +967,19 @@ export function startCronJobs() {
             if (aboveMin >= (mgm.chaseOorUpMinutes ?? 5) && solPure && chases < (mgm.maxChasesPerPool ?? 2) && !_chaseDispatched.has(p.position) && Date.now() - _pollTriggeredAt >= chCd) {
               _pollTriggeredAt = Date.now();
               _chaseDispatched.add(p.position);
+              const dispatchedAt = Date.now(); /* __CHASERESULT__ */
               recordChase(p.pool);
               log("state", `[CHASE] ${p.pair} OOR-ATAS ${Math.round(aboveMin)}m, sisa token ~$${(p.token_x_value_usd ?? 0).toFixed?.(2) ?? p.token_x_value_usd}, chase ${chases + 1}/${mgm.maxChasesPerPool ?? 2} — konfirmasi LLM`);
               notifyChase({ pair: p.pair, minutes: Math.round(aboveMin), chaseNum: chases + 1, maxChase: mgm.maxChasesPerPool ?? 2 }).catch(() => {});
               const chasePrompt = `CHASE-UP CHECK: Position ${p.position} (${p.pair}) in pool ${p.pool} has been OUT OF RANGE ABOVE for ${Math.round(aboveMin)} minutes — price pumped above our range. The position is ~100% SOL (no impermanent loss). Chase attempt ${chases + 1}/${mgm.maxChasesPerPool ?? 2}. First evaluate momentum with pool/token data. IF momentum is still healthy: (1) close_position with reason \"chase_up\", then (2) deploy_position on the SAME pool ${p.pool} below the new price — follow the ACTIVE STRATEGY (hybrid + RANGE DEPTH RULES; a strong pump usually means bid_ask), single-side SOL (amount_y per config, amount_x=0, bins_above=0). IF momentum is broken or volume dried up: just close_position with a normal reason. Act now, no questions.`;
               agentLoop(chasePrompt, config.llm.maxSteps, [], "GENERAL")
-                .then((r) => log("state", `[CHASE] selesai: ${String(r?.content || "").slice(0, 160)}`))
+                .then((r) => {
+                  log("state", `[CHASE] selesai: ${String(r?.content || "").slice(0, 160)}`);
+                  try { /* __CHASERESULT__ */
+                    const redeployed = getTrackedPositions(true).find((t) => t.pool === p.pool && t.deployed_at && Date.parse(t.deployed_at) >= dispatchedAt - 5000);
+                    notifyChaseResult({ pair: p.pair, ok: !!redeployed, detail: String(r?.content || "") }).catch(() => {});
+                  } catch { /* notif best-effort */ }
+                })
                 .catch((e) => log("cron_error", `[CHASE] gagal: ${e.message}`))
                 .finally(() => _chaseDispatched.delete(p.position));
               break;

@@ -492,6 +492,24 @@ export async function notifyChase({ pair, minutes, chaseNum, maxChase }) {
   ).catch(() => {});
 }
 
+/* __CHASERESULT__ notif hasil reshape */
+export async function notifyChaseResult({ pair, ok, detail }) {
+  const escC = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  await sendHTML(
+    ok
+      ? `┏━━ ✅ <b>RESHAPE BERHASIL, BOS</b> ━━┓\n` +
+        `┃ Pool: ${pair}\n` +
+        `┃ Posisi lama ditutup (chase_up, tanpa cooldown)\n` +
+        `┃ Posisi BARU terpasang di bawah harga baru\n` +
+        `┗━━ 🐶 Tangga anyar wis siap, Tuanku. ━━┛`
+      : `┏━━ 🛑 <b>RESHAPE BATAL, BOS</b> ━━┓\n` +
+        `┃ Pool: ${pair}\n` +
+        `┃ Momentum dinilai PATAH — posisi ditutup biasa\n` +
+        `┃ ${escC(detail).slice(0, 200)}\n` +
+        `┗━━ 🐶 Ora sido ngoyak, Tuanku. ━━┛`
+  ).catch(() => {});
+}
+
 export async function notifyOutOfRange({ pair, minutesOOR }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
