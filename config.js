@@ -154,6 +154,8 @@ export const config = {
     chaseDeterministic: management.chaseDeterministic ?? false, /* __CHASEDET__ */
     chaseMinVolumeChangePct: management.chaseMinVolumeChangePct ?? -50,
     chaseMinSwaps5m:    management.chaseMinSwaps5m    ?? 30,
+    chaseUpsidePct:     management.chaseUpsidePct     ?? 3,  /* __UPSIDEHEADROOM__ headroom redeploy chase #1 */
+    deployUpsidePct:    management.deployUpsidePct    ?? 3,  /* __UPSIDEHEADROOM__ headroom default semua deploy single-side */
     poolCooldownEnabled: management.poolCooldownEnabled ?? true,  /* __NOCOOLDOWN__ */
     blacklistOnStopLoss: management.blacklistOnStopLoss ?? false,
     oorCooldownTriggerCount: management.oorCooldownTriggerCount ?? 3,
@@ -281,6 +283,8 @@ export const config = {
     rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
     requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
   },
+
+  momentum: u.momentum ?? { enabled: false }, /* __MOMENTUMPORT__ */
 };
 
 /**
@@ -360,6 +364,16 @@ export function reloadUserConfigIfChanged() {
     const freshInd = freshU.chartIndicators ?? {};
     for (const [key, val] of Object.entries(freshInd)) {
       if (val !== undefined) config.indicators[key] = val;
+    }
+    /* __MOMGATES__ hot-reload momentum (top-level) IN-PLACE — scanner pegang referensi objek config.momentum */
+    const freshMom = freshU.momentum ?? {};
+    for (const [key, val] of Object.entries(freshMom)) {
+      if (val === undefined) continue;
+      if (val && typeof val === "object" && !Array.isArray(val) && config.momentum[key] && typeof config.momentum[key] === "object") {
+        for (const [k2, v2] of Object.entries(val)) { if (v2 !== undefined) config.momentum[key][k2] = v2; }
+      } else {
+        config.momentum[key] = val;
+      }
     }
     reloadScreeningThresholds();
     console.log(`[config] Hot-reloaded user-config.json (mtime ${new Date(st.mtimeMs).toISOString()})`);

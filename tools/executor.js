@@ -1046,8 +1046,13 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
-      const poolThresholds = await validateDeployPoolThresholds(args);
-      if (!poolThresholds.pass) return poolThresholds;
+      /* __CHASEBYPASS__ grant one-shot dari chase #1 (bukan tool — LLM tidak bisa memicu) */
+      if (consumeChaseDeployBypass(args.pool_address)) {
+        log("safety", `deploy_position: threshold pool DI-BYPASS (chase #1) utk ${String(args.pool_address).slice(0, 8)}`);
+      } else {
+        const poolThresholds = await validateDeployPoolThresholds(args);
+        if (!poolThresholds.pass) return poolThresholds;
+      }
 
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
@@ -1120,11 +1125,11 @@ async function runSafetyChecks(name, args) {
       if (
         isSingleSidedSol &&
         args.upside_pct == null &&
-        (!Number.isFinite(requestedBinsAbove) || !Number.isInteger(requestedBinsAbove) || requestedBinsAbove !== 0)
+        (!Number.isFinite(requestedBinsAbove) || !Number.isInteger(requestedBinsAbove) || requestedBinsAbove < 0)
       ) {
         return {
           pass: false,
-          reason: "Single-side SOL deploy must use bins_above=0.",
+          reason: "Single-side SOL deploy needs bins_above as a non-negative integer (empty upside headroom only).", /* __UPSIDEHEADROOM__ */
         };
       }
 
@@ -1275,4 +1280,20 @@ function summarizeResult(result) {
     return str.slice(0, 1000) + "...(truncated)";
   }
   return result;
+}
+
+/* __CHASEBYPASS__ one-shot threshold bypass utk chase #1 deterministic.
+   Dipanggil dari kode (index.js) TEPAT sebelum executeTool deploy_position;
+   BUKAN tool & BUKAN argumen tool — LLM tidak punya jalur untuk memicu ini. */
+const _chaseDeployBypass = new Map();
+export function grantChaseDeployBypass(poolAddress) {
+  if (!poolAddress) return;
+  _chaseDeployBypass.set(String(poolAddress), Date.now() + 60000);
+}
+function consumeChaseDeployBypass(poolAddress) {
+  const key = String(poolAddress ?? "");
+  const exp = _chaseDeployBypass.get(key);
+  if (!exp) return false;
+  _chaseDeployBypass.delete(key);
+  return Date.now() <= exp;
 }

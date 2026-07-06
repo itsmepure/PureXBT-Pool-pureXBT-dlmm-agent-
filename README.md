@@ -8,6 +8,17 @@ Meridian runs continuous screening and management cycles, deploying capital into
 
 ---
 
+## What's New (v3.5)
+
+- **Momentum sourcing** — a fast scan loop (default every 20s, DexScreener-backed) watches the prescreened candidate universe for live breakouts (volume surge, buy pressure, price velocity, tx count → weighted entry score); hot candidates deploy immediately without waiting for the next screening cycle. A hard-AND prescreen gate (mcap band / 5m volume / tx count / LP floor) keeps junk out, with a 5-minute observability rollup in the logs. `momentum.enabled: false` by default — the classic screening loop keeps working either way, and a momentum-death signal (buys<sells or negative price move) doubles as an extra exit trigger for open positions
+- **Momentum Gates panel** — all momentum/prescreen thresholds are editable live from the dashboard (new `/api/momentum` GET/POST, per-key deep-merge) and hot-reload into the running scanner within ~15s, no restart
+- **Guaranteed chase #1 (reshape v2)** — the first chase is now fully blind: no market research round-trip, and pool screening thresholds are bypassed via a one-shot in-process grant that tool-calling LLMs cannot trigger; chase #2 keeps the full LLM momentum judgment
+- **Upside headroom** — single-sided SOL deploys can now reserve empty bins above the active price (default `deployUpsidePct: 3`); a small continued pump no longer flags the position out-of-range instantly, while the buy ladder below is unchanged. Chase re-deploys use the same headroom (`chaseUpsidePct`)
+- **IDR on realized PnL** — close notifications, the daily recap caption, and the dashboard realized-PnL panel now show Rupiah alongside SOL/USD (new `tools/fx.js`, 6h-cached USD→IDR rate, fails silent — if the rate API is down you simply see SOL/USD as before)
+- **Telegram send retry** — transient network blips / 5xx / 429 no longer permanently swallow notifications: text sends and PnL-card photo uploads retry twice with backoff
+
+---
+
 ## What's New (v3.4)
 
 - **Two-tier chase (reshape)** — chase #1 executes immediately (deterministic close + re-deploy, ~10s end-to-end, no LLM roundtrip; the position is pure SOL so the cost of being wrong is just gas, and live executor safety checks still veto dead pools); chase #2 — when the re-deployed position pumps out *again* — goes through a full LLM momentum judgment. `chaseDeterministic: false` reverts everything to the LLM path

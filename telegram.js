@@ -84,14 +84,30 @@ export function isEnabled() {
   return !!TOKEN;
 }
 
+/* __TGRETRY__ kirim dgn retry 2x (backoff 2s/5s) — kedipan jaringan VPS->api.telegram.org bikin notif hilang permanen (audit S30 §177). Retry HANYA network error / 5xx / 429; 4xx lain = permanen, jangan diulang. */
+async function fetchTgRetry(url, opts, tag) {
+  const delays = [2000, 5000];
+  for (let att = 0; ; att++) {
+    try {
+      const res = await fetch(url, opts);
+      if (res.ok || (res.status < 500 && res.status !== 429) || att >= delays.length) return res;
+      log("telegram_warn", `${tag} HTTP ${res.status} — retry ${att + 1}/${delays.length}`);
+    } catch (e) {
+      if (att >= delays.length) throw e;
+      log("telegram_warn", `${tag} ${e.message} — retry ${att + 1}/${delays.length}`);
+    }
+    await new Promise((r) => setTimeout(r, delays[att]));
+  }
+}
+
 async function postTelegram(method, body) {
   if (!TOKEN || !chatId) return null;
   try {
-    const res = await fetch(`${BASE}/${method}`, {
+    const res = await fetchTgRetry(`${BASE}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, ...body }),
-    });
+    }, method); /* __TGRETRY__ */
     if (!res.ok) {
       const err = await res.text();
       log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
@@ -107,11 +123,11 @@ async function postTelegram(method, body) {
 async function postTelegramRaw(method, body) {
   if (!TOKEN) return null;
   try {
-    const res = await fetch(`${BASE}/${method}`, {
+    const res = await fetchTgRetry(`${BASE}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    });
+    }, method); /* __TGRETRY__ */
     if (!res.ok) {
       const err = await res.text();
       log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
@@ -458,11 +474,18 @@ export async function notifyClose({ pair, pnlUsd, pnlPct, result, tracked, walle
 
   const sign = pnlUsd >= 0 ? "+" : "";
   const _cMood = (pnlUsd ?? 0) >= 0 ? "🟢 bathi" : "🔴 buntung";
+  let _idrTxt = ""; /* __IDR__ */
+  try {
+    const { getUsdIdrRate, formatIdr } = await import("./tools/fx.js");
+    const rate = Number.isFinite(Number(pnlUsd)) ? await getUsdIdrRate() : null;
+    if (rate) _idrTxt = `┃ IDR: ${pnlUsd >= 0 ? "+" : ""}${formatIdr(pnlUsd * rate)}\n`;
+  } catch { /* best-effort */ }
   await sendHTML(
     `┏━━ 🔒 <b>POSISI DITUTUP, BOS</b> ━━┓\n` +
     `┃ Pool: ${pair}\n` +
     `┃ PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)\n` +
     `┃ Asil: ${_cMood}\n` +
+    _idrTxt +
     (reason ? `┃ Alasan: ${String(reason).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 160)}\n` : "") +
     `┗━━ 🐶 Wis ditutup, Tuanku. ━━┛`
   );

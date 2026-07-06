@@ -176,7 +176,16 @@ async function main() {
   // send via Telegram sendPhoto (multipart)
   const form = new FormData();
   form.append("chat_id", String(CHAT));
-  const cap = `📊 Daily P&L — ${data.dateLabel}\n${dailyPnlSol >= 0 ? "🟢" : "🔴"} ${dailyPnlSol >= 0 ? "+" : "-"}${Math.abs(dailyPnlSol).toFixed(4)} SOL | ${positions} posisi | WR ${winRatePct.toFixed(1)}%`;
+  let capFx = ""; /* __IDR__ pnlUsd = agregat USD harian (sudah dihitung di atas) */
+  try {
+    const { getUsdIdrRate, formatIdr } = await import("./tools/fx.js");
+    if (Number.isFinite(Number(pnlUsd))) {
+      const rate = await getUsdIdrRate();
+      const usdTxt = `${pnlUsd >= 0 ? "+" : "-"}$${Math.abs(pnlUsd).toFixed(2)}`;
+      capFx = ` | \u2248 ${usdTxt}` + (rate ? ` | ${pnlUsd >= 0 ? "+" : ""}${formatIdr(pnlUsd * rate)}` : "");
+    }
+  } catch { /* best-effort */ }
+  const cap = `📊 Daily P&L — ${data.dateLabel}\n${dailyPnlSol >= 0 ? "🟢" : "🔴"} ${dailyPnlSol >= 0 ? "+" : "-"}${Math.abs(dailyPnlSol).toFixed(4)} SOL${capFx} | ${positions} posisi | WR ${winRatePct.toFixed(1)}%`;
   form.append("caption", cap);
   form.append("photo", new Blob([png], { type: "image/png" }), "daily.png");
   const r = await fetchTimeout(`https://api.telegram.org/bot${TOKEN}/sendPhoto`, { method: "POST", body: form }, 20000);

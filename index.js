@@ -12,7 +12,8 @@ import { getTopCandidates } from "./tools/screening.js";
 import { prescreenPools } from "./pool-scorer.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
-import { executeTool, registerCronRestarter } from "./tools/executor.js";
+import { executeTool, registerCronRestarter, grantChaseDeployBypass } from "./tools/executor.js";
+import { setCandidatePools, startMomentumLoop, getExitFlag, getHotList, isOnCooldown, markDeployed, setOnScanComplete, computeDownsidePct, takePrescreenRollup } from "./tools/momentum-scanner.js"; /* __MOMENTUMPORT__ */
 import {
   startPolling,
   stopPolling,
@@ -136,7 +137,36 @@ const _chaseDispatched = new Set();
 /* __INDEXIT__ indicator exit */
 import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 const _indExitLastCheck = new Map();
-const _indExitAlerts = new Map(); // epoch ms — cooldown for poller-triggered management
+const _indExitAlerts = new Map();
+/* __CHASECARD__ card close chase dgn argumen selengkap jalur executor */
+async function sendChaseCloseCard({ position, pair, pool, reason, closeRes = null }) {
+  try {
+    const trk = getTrackedPositions(false).find((t) => t.position === position) || {};
+    if (!closeRes) {
+      try { // pnl nyata dari decision-log (jalur LLM tak membawa closeRes)
+        const fsm = await import("fs");
+        const dl = JSON.parse(fsm.readFileSync("decision-log.json", "utf8"));
+        const arr = Array.isArray(dl) ? dl : (dl.decisions || []);
+        const e = [...arr].reverse().find((d) => d.type === "close" && d.position === position);
+        if (e?.metrics) closeRes = { pool_name: pair, pool, pnl_usd: e.metrics.pnl_usd, pnl_pct: e.metrics.pnl_pct };
+      } catch { /* best-effort */ }
+    }
+    let solPrice = null;
+    try { const b = await getWalletBalances(); solPrice = b?.sol_price ?? b?.solPrice ?? null; } catch { /* best-effort */ }
+    await notifyClose({
+      pair,
+      pnlUsd: closeRes?.pnl_usd ?? 0,
+      pnlPct: closeRes?.pnl_pct ?? 0,
+      result: closeRes || { pool_name: pair, pool },
+      tracked: trk,
+      solPrice,
+      reason,
+      walletAddress: (() => { try { return deriveAddress(process.env.WALLET_PRIVATE_KEY || ""); } catch { return null; } })(),
+      brand: process.env.CARD_BRAND || "PureXBT",
+      url: process.env.CARD_URL || "dlmm.purexbt.dev",
+    });
+  } catch (e) { log("telegram_warn", `chase close card gagal: ${e.message}`); }
+} // epoch ms — cooldown for poller-triggered management
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
 const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
@@ -323,6 +353,14 @@ export async function runManagementCycle({ silent = false } = {}) {
         exitMap.set(p.position, _indExitAlerts.get(p.position));
         log("state", `Exit alert (indicator) for ${p.pair}: ${_indExitAlerts.get(p.position)}`);
         _indExitAlerts.delete(p.position);
+      }
+      /* __MOMENTUMPORT__ momentum death exit — trigger tambahan, tak menekan SL/TP/trailing */
+      if (config.momentum?.enabled && !exitMap.has(p.position)) {
+        const mmMint = p.base_mint || p.token_x?.mint || null;
+        if (mmMint && getExitFlag(mmMint)) {
+          exitMap.set(p.position, "momentum-exit (buys<sells or price<0)");
+          log("state", `Momentum exit for ${p.pair}: momentum died`);
+        }
       }
       if (exitMap.has(p.position)) {
         actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exitMap.get(p.position) });
@@ -553,7 +591,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Load active strategy
     const activeStrategy = getActiveStrategy();
     const strategyBlock = activeStrategy
-      ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}${activeStrategy.lp_strategy === "hybrid" ? `\nSTRATEGY SELECTION RULES (hybrid — pick spot or bid_ask per candidate): ${activeStrategy.entry?.notes ?? ""}` : ""}` /* __HYBRIDSTRAT__ */
+      ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}${activeStrategy.entry?.notes ? `\nSTRATEGY RULES: ${activeStrategy.entry.notes}` : ""}` /* __HYBRIDSTRAT__ __NOTESINJECT__ notes SEMUA strategi ikut ke prompt (spot_only butuh SPOT DEPTH RULES) */
       : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
 
     // Phase 1: Deterministic pre-screening — score, enrich memory/wallets in parallel, return top 5
@@ -567,6 +605,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const earlyFilteredExamples = rejectedArr.slice(0, 5)
       .map((r) => ({ name: r.name, reason: r.reason }));
     log("screening", `Prescreen: ${prescreenResult.totalScreened} screened → ${prescreened.length} qualified (${prescreenResult.ms}ms)`);
+
+    /* __MOMENTUMPORT__ feed kandidat prescreen ke fast scan loop */
+    if (config.momentum?.enabled) {
+      setCandidatePools(prescreened);
+    }
 
     if (prescreened.length === 0) {
       screeningOutcome = "no_candidates_after_prescreen";
@@ -988,53 +1031,25 @@ export function startCronJobs() {
                 (async () => {
                   let outcomeDetail = "";
                   try {
-                    const { getPoolDetail } = await import("./tools/screening.js");
-                    let det = null;
-                    for (let att = 0; att < 2 && !det; att++) {
-                      try { det = await getPoolDetail({ pool_address: _cpool, timeframe: "5m" }); }
-                      catch (e) { if (att === 0) { await new Promise((r) => setTimeout(r, 3000)); } else { log("state", `[CHASE-DET] getPoolDetail gagal 2x utk ${_cpair}: ${e.message}`); } }
-                    }
-                    const binStepDet = det?.dlmm_params?.bin_step ?? null;
-                    const volat = Number(det?.volatility ?? 0);
-                    const volChg = det?.volume_change_pct;
-                    const vol5m = Number(det?.volume ?? 0);
-                    const swaps = Number(det?.swap_count ?? 0);
-                    const minVolChg = Number(config.management.chaseMinVolumeChangePct ?? -50);
-                    const minSwaps = Number(config.management.chaseMinSwaps5m ?? 30);
-                    const volOk = volChg == null ? vol5m > 0 : Number(volChg) > minVolChg;
-                    const pass = true; /* __CHASE1BLIND__ chase #1 tanpa gerbang — posisi 100% SOL (tanpa IL); executor safety (fee/activeTVL, depth clamp, dll) tetap menyaring deploy */
-                    const numbers = det ? `volD ${volChg ?? "?"}%, swaps ${swaps}, volatility ${volat}, bin_step ${binStepDet ?? "?"}` : "pool absent from discovery — pump dead";
-                    outcomeDetail = numbers;
-                    if (pass) {
-                      log("state", `[CHASE-DET] ${_cpair} chase #1 LANGSUNG (tanpa gerbang; data: ${numbers}) — close+redeploy`);
-                      const closeRes = await executeTool("close_position", { position_address: _cpos, reason: `chase_up (deterministic) — ${numbers}`, suppress_close_notif: true }); /* __NOTIFSUPPRESS__ */
-                      if (closeRes?.success !== false && !closeRes?.error) {
-                        const bal = await getWalletBalances().catch(() => null);
-                        const amt = bal?.sol ? computeDeployAmount(bal.sol) : (config.management.deployAmountSol ?? 5);
-                        const depth = Math.min(60, Math.max(40, Math.round(40 + volat * 2)));
-                        const depRes = await executeTool("deploy_position", {
-                          pool_address: _cpool, pool_name: _cpair, amount_y: amt, amount_x: 0, bins_above: 0,
-                          strategy: "bid_ask", downside_pct: depth,
-                          strategy_reason: `chase deterministic: ${numbers} -> bid_ask -${depth}%`,
-                          bin_step: binStepDet ?? undefined, volatility: volat > 0 ? volat : undefined, fee_tvl_ratio: det?.fee_active_tvl_ratio ?? undefined,
-                        });
-                        const depOk = depRes && depRes.success !== false && !depRes.error && !depRes.blocked;
-                        if (!depOk) { /* __NOTIFSUPPRESS__ deploy gagal → posisi benar2 berakhir → kirim card close yang tadi ditahan */
-                          log("state", `[CHASE-DET] ${_cpair} redeploy GAGAL (${String(depRes?.reason || depRes?.error || "?").slice(0, 80)}) — kirim notif close`);
-                          notifyClose({
-                            pair: _cpair,
-                            pnlUsd: closeRes?.pnl_usd ?? 0,
-                            pnlPct: closeRes?.pnl_pct ?? 0,
-                            result: closeRes,
-                            reason: `chase_up — redeploy gagal (${String(depRes?.reason || depRes?.error || "safety").slice(0, 100)})`,
-                            brand: process.env.CARD_BRAND || "PureXBT",
-                            url: process.env.CARD_URL || "dlmm.purexbt.dev",
-                          }).catch(() => {});
-                        }
+                    /* __CHASE1BLINDV2__ chase #1 BLIND TOTAL — tanpa research, threshold executor di-bypass (wajib redeploy). chase #2 tetap jalur LLM. */
+                    const upPct = Number(config.management.chaseUpsidePct ?? 3);
+                    outcomeDetail = `chase #1 blind: bid_ask -40% +${upPct}% headroom, thresholds bypassed`;
+                    log("state", `[CHASE-DET] ${_cpair} chase #1 BLIND (tanpa research) — close+redeploy headroom +${upPct}%`);
+                    const closeRes = await executeTool("close_position", { position_address: _cpos, reason: "chase_up (deterministic) — chase #1 blind", suppress_close_notif: true }); /* __NOTIFSUPPRESS__ */
+                    if (closeRes?.success !== false && !closeRes?.error) {
+                      const bal = await getWalletBalances().catch(() => null);
+                      const amt = bal?.sol ? computeDeployAmount(bal.sol) : (config.management.deployAmountSol ?? 5);
+                      grantChaseDeployBypass(_cpool); /* __CHASEBYPASS__ threshold pool di-skip khusus deploy ini */
+                      const depRes = await executeTool("deploy_position", {
+                        pool_address: _cpool, pool_name: _cpair, amount_y: amt, amount_x: 0, bins_above: 0,
+                        strategy: "bid_ask", downside_pct: 40, upside_pct: upPct > 0 ? upPct : undefined,
+                        strategy_reason: `chase #1 blind: bid_ask -40% +${upPct}% headroom (no research)`,
+                      });
+                      const depOk = depRes && depRes.success !== false && !depRes.error && !depRes.blocked;
+                      if (!depOk) { /* __NOTIFSUPPRESS__ deploy gagal → posisi benar2 berakhir → kirim card close yang tadi ditahan */
+                        log("state", `[CHASE-DET] ${_cpair} redeploy GAGAL (${String(depRes?.reason || depRes?.error || "?").slice(0, 80)}) — kirim notif close`);
+                        sendChaseCloseCard({ position: _cpos, pair: _cpair, pool: _cpool, closeRes, reason: `chase_up — redeploy gagal (${String(depRes?.reason || depRes?.error || "safety").slice(0, 100)})` }).catch(() => {}); /* __CHASECARD__ */
                       }
-                    } else {
-                      log("state", `[CHASE-DET] ${_cpair} GAGAL gerbang (${numbers}) — close biasa`);
-                      await executeTool("close_position", { position_address: _cpos, reason: `chase aborted (deterministic): ${numbers}` });
                     }
                   } catch (e) {
                     log("cron_error", `[CHASE-DET] gagal: ${e.message}`);
@@ -1048,7 +1063,7 @@ export function startCronJobs() {
                 })();
                 break;
               }
-              const chasePrompt = `CHASE-UP CHECK: Position ${p.position} (${p.pair}) in pool ${p.pool} has been OUT OF RANGE ABOVE for ${Math.round(aboveMin)} minutes — price pumped above our range. The position is ~100% SOL (no impermanent loss). Chase attempt ${chases + 1}/${mgm.maxChasesPerPool ?? 2}. First evaluate MARKET momentum via get_pool_detail: volume, swap_count, unique_traders, volatility, price_trend and their window changes. If get_pool_detail fails or returns unusable data, retry it ONCE before deciding (transient API hiccups usually recover in seconds). If after the retry the pool is STILL missing from discovery or shows bin_step/volatility unknown, treat that as PROOF the pump is dead (discovery only indexes pools with recent trading activity) — close normally right away, do not waste steps trying other categories/timeframes. Judge ONLY by market data — do NOT use smart-wallet presence as a reason to chase or to skip (wallets can be bagholding; only live trading activity counts). IF market momentum is still healthy: (1) close_position with reason \"chase_up\", then (2) deploy_position on the SAME pool ${p.pool} below the new price — follow the ACTIVE STRATEGY (hybrid + RANGE DEPTH RULES; a strong pump usually means bid_ask), single-side SOL (amount_y per config, amount_x=0, bins_above=0). IF momentum is broken or volume dried up: just close_position with a normal reason and END — the ONLY pool you may deploy in this session is ${p.pool}; NEVER call deploy_position on any other pool, and never redeploy freed capital elsewhere (screening handles that). Act now, no questions.`;
+              const chasePrompt = `CHASE-UP CHECK: Position ${p.position} (${p.pair}) in pool ${p.pool} has been OUT OF RANGE ABOVE for ${Math.round(aboveMin)} minutes — price pumped above our range. The position is ~100% SOL (no impermanent loss). Chase attempt ${chases + 1}/${mgm.maxChasesPerPool ?? 2}. First evaluate MARKET momentum via get_pool_detail: volume, swap_count, unique_traders, volatility, price_trend and their window changes. If get_pool_detail fails or returns unusable data, retry it ONCE before deciding (transient API hiccups usually recover in seconds). If after the retry the pool is STILL missing from discovery or shows bin_step/volatility unknown, treat that as PROOF the pump is dead (discovery only indexes pools with recent trading activity) — close normally right away, do not waste steps trying other categories/timeframes. Judge ONLY by market data — do NOT use smart-wallet presence as a reason to chase or to skip (wallets can be bagholding; only live trading activity counts). IF market momentum is still healthy: (1) close_position with reason \"chase_up\", then (2) deploy_position on the SAME pool ${p.pool} below the new price — follow the ACTIVE STRATEGY (SPOT ONLY + SPOT DEPTH RULES), single-side SOL (amount_y per config, amount_x=0, bins_above=0). IF momentum is broken or volume dried up: just close_position with a normal reason and END — the ONLY pool you may deploy in this session is ${p.pool}; NEVER call deploy_position on any other pool, and never redeploy freed capital elsewhere (screening handles that). Act now, no questions.`;
               agentLoop(chasePrompt, config.llm.maxSteps, [], "GENERAL")
                 .then((r) => {
                   log("state", `[CHASE] selesai: ${String(r?.content || "").slice(0, 160)}`);
@@ -1060,15 +1075,7 @@ export function startCronJobs() {
                       const trkAll = getTrackedPositions(false).find((t) => t.position === p.position);
                       const wasChaseClose = !!trkAll?.closed && (trkAll.notes || []).some((n) => /chase_up/i.test(String(n)));
                       if (wasChaseClose) {
-                        notifyClose({
-                          pair: p.pair,
-                          pnlUsd: 0, pnlPct: 0,
-                          result: { pool_name: p.pair, pool: p.pool },
-                          reason: "chase_up — tidak berujung redeploy (posisi ditutup)",
-                          walletAddress: (() => { try { return deriveAddress(process.env.WALLET_PRIVATE_KEY || ""); } catch { return null; } })(),
-                          brand: process.env.CARD_BRAND || "PureXBT",
-                          url: process.env.CARD_URL || "dlmm.purexbt.dev",
-                        }).catch(() => {});
+                        sendChaseCloseCard({ position: p.position, pair: p.pair, pool: p.pool, reason: "chase_up — tidak berujung redeploy (posisi ditutup)" }).catch(() => {}); /* __CHASECARD__ */
                       }
                     }
                   } catch { /* notif best-effort */ }
@@ -1171,6 +1178,16 @@ export function startCronJobs() {
   // Store interval ref so stopCronJobs can clear it
   _cronTasks._pnlPollInterval = pnlPollInterval;
   log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);
+  /* __MOMENTUMPORT__ scanner momentum (sourcing ala B) */
+  if (config.momentum?.enabled) {
+    setOnScanComplete(async (cfg) => {
+      const rollup = takePrescreenRollup(cfg);
+      if (rollup) log("state", `[MOMENTUM] ${rollup.line}`);
+      await runMomentumDeployDriver(cfg);
+    });
+    startMomentumLoop(config.momentum);
+    log("cron", `Momentum scan loop started — every ${config.momentum.scanIntervalSec || 20}s`);
+  }
 }
 
 // ═══════════════════════════════════════════
@@ -1771,6 +1788,62 @@ async function deployLatestCandidate(index) {
     throw new Error(result.error || "Deploy failed");
   }
   return { result, candidate, deployAmount, binsBelow };
+}
+
+/* __MOMENTUMPORT__ deploy driver hot-list — strategy mengikuti config.strategy.strategy (hybrid); depth dari volatility di-clamp executor per band strategi. */
+async function deployHotCandidate(candidate) {
+  const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
+  const downsidePct = computeDownsidePct(candidate.volatility);
+  const result = await executeTool("deploy_position", {
+    pool_address: candidate.pool,
+    amount_y: deployAmount,
+    strategy: config.strategy.strategy,
+    downside_pct: downsidePct,
+    bins_above: 0,
+    pool_name: candidate.name,
+    base_mint: candidate.base?.mint || candidate.base_mint || null,
+    bin_step: candidate.bin_step,
+    base_fee: candidate.base_fee,
+    volatility: candidate.volatility,
+    fee_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio,
+    organic_score: candidate.organic_score,
+    initial_value_usd: candidate.tvl ?? candidate.active_tvl ?? null,
+  });
+  if (result?.success === false || result?.error) {
+    throw new Error(result.error || "Deploy failed");
+  }
+  return { result, deployAmount, downsidePct };
+}
+
+let _momentumDeployBusy = false;
+async function runMomentumDeployDriver(cfg) {
+  if (_momentumDeployBusy) return;
+  _momentumDeployBusy = true;
+  try {
+    const positions = await getMyPositions().catch(() => []);
+    const openMints = new Set((positions || []).map((p) => p.base_mint || p.token_x?.mint).filter(Boolean));
+    let openCount = (positions || []).length;
+    const maxPos = config.risk?.maxPositions ?? 2;
+    if (openCount >= maxPos) return;
+    const hot = getHotList(cfg);
+    for (const h of hot) {
+      if (openCount >= maxPos) break;
+      if (!h.candidate) continue;
+      if (openMints.has(h.mint)) continue;
+      if (isOnCooldown(h.mint)) continue;
+      try {
+        log("state", `Momentum deploy: ${h.candidate.name} score=${h.score} (mint ${h.mint})`);
+        await deployHotCandidate(h.candidate);
+        markDeployed(h.mint, cfg);
+        openMints.add(h.mint);
+        openCount++;
+      } catch (e) {
+        log("cron_error", `Momentum deploy failed for ${h.candidate?.name}: ${e.message}`);
+      }
+    }
+  } finally {
+    _momentumDeployBusy = false;
+  }
 }
 
 function appendHistory(userMsg, assistantMsg) {

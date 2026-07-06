@@ -5,19 +5,16 @@
   "llmApiKey": "",
   "llmModel": "minimax/minimax-m2.7",
   "dryRun": true,
-
   "deployAmountSol": 0.5,
   "maxPositions": 3,
   "minSolToOpen": 0.55,
   "maxDeployAmount": 50,
   "gasReserve": 0.2,
   "positionSizePct": 0.35,
-
   "strategy": "bid_ask",
   "minBinsBelow": 35,
   "maxBinsBelow": 69,
   "defaultBinsBelow": 69,
-
   "timeframe": "5m",
   "category": "trending",
   "excludeHighSupplyConcentration": true,
@@ -48,7 +45,6 @@
   "minTokenAgeHours": null,
   "maxTokenAgeHours": null,
   "athFilterPct": null,
-
   "minClaimAmount": 5,
   "autoSwapAfterClaim": false,
   "feeSplitUsdcPct": 40,
@@ -66,18 +62,15 @@
   "trailingDropPct": 1.5,
   "pnlSanityMaxDiffPct": 5,
   "solMode": false,
-
   "managementIntervalMin": 10,
   "screeningIntervalMin": 30,
   "healthCheckIntervalMin": 60,
-
   "temperature": 0.373,
   "maxTokens": 4096,
   "maxSteps": 20,
   "managementModel": "minimax/minimax-m2.5",
   "screeningModel": "minimax/minimax-m2.5",
   "generalModel": "minimax/minimax-m2.7",
-
   "darwinEnabled": true,
   "darwinWindowDays": 60,
   "darwinRecalcEvery": 5,
@@ -86,7 +79,6 @@
   "darwinFloor": 0.3,
   "darwinCeiling": 2.5,
   "darwinMinSamples": 10,
-
   "agentId": "",
   "publicApiKey": "",
   "agentPureXbtApiUrl": "https://api.agentmeridian.xyz/api",
@@ -96,7 +88,9 @@
     "entryPreset": "supertrend_break",
     "exitPreset": "supertrend_break",
     "rsiLength": 2,
-    "intervals": ["5_MINUTE"],
+    "intervals": [
+      "5_MINUTE"
+    ],
     "candles": 298,
     "rsiOversold": 30,
     "rsiOverbought": 80,
@@ -105,5 +99,41 @@
   "telegramChatId": "",
   "hiveMindUrl": "",
   "hiveMindApiKey": "",
-  "hiveMindPullMode": "auto"
+  "hiveMindPullMode": "auto",
+  "chaseUpsidePct": 3,
+  "deployUpsidePct": 3,
+  "momentum": {
+    "enabled": false,
+    "scanIntervalSec": 20,
+    "windowMin": 5,
+    "entryScore": 65,
+    "thresholds": {
+      "volumeUsd": 5000,
+      "buysVsSells": 1.5,
+      "priceChangePct": 3,
+      "txCount": 30
+    },
+    "weights": {
+      "volumeUsd": 30,
+      "buysVsSells": 30,
+      "priceChangePct": 25,
+      "txCount": 15
+    },
+    "exit": {
+      "buysVsSellsBelow": 1,
+      "priceChangeBelow": 0
+    },
+    "source": "dexscreener",
+    "hotTtlSec": 90,
+    "maxConcurrentScans": 4,
+    "cooldownSec": 600,
+    "prescreen": {
+      "enabled": true,
+      "mcapMin": 100000,
+      "mcapMax": 10000000,
+      "volumeUsd": 500,
+      "txCount": 5,
+      "lpUsd": 10000
+    }
+  }
 }

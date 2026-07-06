@@ -506,6 +506,7 @@ async function handleState(req, res) {
       closedCount,
       openPnlUsd: Math.round(openPnlUsd * 100) / 100,
       realizedPnlUsd: Math.round(realizedPnlUsd * 100) / 100,
+      usdIdrRate: _usdIdrRate, /* __IDR__ */
       totalPnlUsd: Math.round(totalPnlUsd * 100) / 100,
       winRate,
       totalDeploys,
@@ -2044,7 +2045,7 @@ function serveUI(req, res) {
 // ─── Router ─────────────────────────────────────────────────────
 
 const API_ROUTES = new Set([
-  "/api/state", "/api/config", "/api/llm", "/api/llm/status",
+  "/api/state", "/api/config", "/api/momentum", "/api/llm", "/api/llm/status",
   "/api/wallets", "/api/agent", "/api/agent/start", "/api/agent/stop",
   "/api/decisions", "/api/stats", "/api/history", "/api/logs",
   "/api/action", "/api/chat", "/api/chat/history", "/api/health", "/api/auth/preview",
@@ -2131,6 +2132,8 @@ function createServer() {
 
     // API routes
     if (p === "/api/state")     return handleState(req, res);
+    if (p === "/api/momentum" && req.method === "GET")  return handleGetMomentum(req, res); /* __MOMGATES__ */
+    if (p === "/api/momentum" && req.method === "POST") return handlePostMomentum(req, res);
     if (p === "/api/config" && req.method === "GET")  return handleGetConfig(req, res);
     if (p === "/api/config" && req.method === "POST") return handlePostConfig(req, res);
     if (p === "/api/llm" && req.method === "GET") return handleGetLLM(req, res);
@@ -2235,4 +2238,53 @@ export function stopDashboard() {
 
 export function getDashboardPort() {
   return PORT;
+}
+
+/* __IDR__ kurs USD->IDR utk panel realized pnl — refresh 30 menit, null-safe */
+let _usdIdrRate = null;
+(async function _refreshIdr() {
+  try {
+    const { getUsdIdrRate } = await import("./tools/fx.js");
+    _usdIdrRate = await getUsdIdrRate();
+  } catch { /* biarkan null */ }
+  const t = setTimeout(_refreshIdr, 30 * 60 * 1000);
+  if (t.unref) t.unref();
+})();
+
+/* __MOMGATES__ GET/POST gate momentum utk panel Settings — deep-merge PER-KEY (pelajaran wallet-config REPLACE bug) */
+function handleGetMomentum(req, res) {
+  if (getRole(req) === "preview") return jsonReply(res, 200, { ok: false, error: "preview" });
+  try {
+    const u = readUserConfig();
+    const wid = process.env.WALLET_ID;
+    const scr = (wid && u.wallets?.[wid]?.screening) || u.global?.screening || u.screening || {};
+    const p = u.momentum?.prescreen || {}, t = u.momentum?.thresholds || {};
+    jsonReply(res, 200, { ok: true, gates: {
+      mcapMin: p.mcapMin ?? null, mcapMax: p.mcapMax ?? null, volumeUsd: p.volumeUsd ?? null,
+      txCount: p.txCount ?? null, lpUsd: p.lpUsd ?? null,
+      scanVolumeUsd: t.volumeUsd ?? null, scanTxCount: t.txCount ?? null,
+      minVolume: scr.minVolume ?? 500,
+    }});
+  } catch (e) { jsonReply(res, 500, { ok: false, error: e.message }); }
+}
+async function handlePostMomentum(req, res) {
+  if (!requireOwner(req, res)) return;
+  const body = await parseBody(req);
+  if (!body || typeof body !== "object") return jsonReply(res, 400, { ok: false, error: "Invalid body" });
+  const num = (v) => (v === "" || v == null || !Number.isFinite(Number(v)) ? undefined : Number(v));
+  try {
+    const u = readUserConfig();
+    u.momentum = u.momentum || {}; u.momentum.prescreen = u.momentum.prescreen || {}; u.momentum.thresholds = u.momentum.thresholds || {};
+    const P = u.momentum.prescreen, T = u.momentum.thresholds;
+    const map = { mcapMin: [P, "mcapMin"], mcapMax: [P, "mcapMax"], volumeUsd: [P, "volumeUsd"], txCount: [P, "txCount"], lpUsd: [P, "lpUsd"], scanVolumeUsd: [T, "volumeUsd"], scanTxCount: [T, "txCount"] };
+    for (const [k, pair] of Object.entries(map)) { const v = num(body[k]); if (v !== undefined) pair[0][pair[1]] = v; }
+    const mv = num(body.minVolume);
+    if (mv !== undefined) {
+      const wid = process.env.WALLET_ID;
+      if (wid) { u.wallets = u.wallets || {}; u.wallets[wid] = u.wallets[wid] || {}; u.wallets[wid].screening = { ...(u.wallets[wid].screening || {}), minVolume: mv }; }
+      else { u.global = u.global || {}; u.global.screening = { ...(u.global.screening || {}), minVolume: mv }; }
+    }
+    writeUserConfig(u);
+    jsonReply(res, 200, { ok: true });
+  } catch (e) { jsonReply(res, 500, { ok: false, error: e.message }); }
 }
