@@ -936,7 +936,8 @@ export async function executeTool(name, args) {
             const isSolLike = (m) => typeof m === "string" && m.length >= 32 && m.length <= 44 && m.startsWith("So1");
             const usdcPct = Math.max(0, Math.min(100, Number(config.management.feeSplitUsdcPct ?? 40)));
 
-            const balances = await getBalancesWithRetry();
+            /* __CLAIMSETTLE__ balance API telat meng-indeks token hasil claim (kasus SELLOR 6 Jul: token $7.3 mendarat tapi sweep baca 0) — tunggu base_mint settle spt jalur close */
+            const balances = await getBalancesAfterClose(result.base_mint);
             const allTokens = balances.tokens || [];
             const sweepable = allTokens.filter(t => {
               if (!t || !t.mint) return false;

@@ -17,6 +17,7 @@ Meridian runs continuous screening and management cycles, deploying capital into
 - **IDR on realized PnL** — close notifications, the daily recap caption, and the dashboard realized-PnL panel now show Rupiah alongside SOL/USD (new `tools/fx.js`, 6h-cached USD→IDR rate, fails silent — if the rate API is down you simply see SOL/USD as before)
 - **Telegram send retry** — transient network blips / 5xx / 429 no longer permanently swallow notifications: text sends and PnL-card photo uploads retry twice with backoff
 - **Daily PnL card accuracy fix** — every close was double-written to the decision log by two call sites, silently doubling the daily recap card's PnL, position count, and fees. The duplicate writer is removed and the daily aggregation is now duplicate-resistant, so recaps are correct even over historical log entries
+- **Auto-swap after claim fix** — standalone fee claims raced the wallet-balance indexer: the just-claimed token often wasn't visible yet, so the post-claim sweep saw "0 tokens" and quietly left fee tokens sitting in the wallet. The claim path now waits for the claimed base mint to settle (same retry helper the close path already used), so both close and claim sweeps reliably convert fee tokens to SOL
 
 ---
 
