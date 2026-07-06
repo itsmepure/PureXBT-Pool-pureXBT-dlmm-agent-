@@ -127,7 +127,11 @@ async function main() {
   for (const d of decisions) {
     const t = Date.parse(d.ts);
     if (!Number.isFinite(t) || t < startUtc || t >= endUtc) continue;
-    if (d.type === "close") closes.push(d);
+    if (d.type === "close") {
+      /* __CLOSEDEDUP__ decision-log historis berisi entry close dobel (2 penulis, ~40ms) — skip duplikat: pnl_usd sama & selisih <10s */
+      const isDup = closes.some((k) => Math.abs(Date.parse(k.ts) - t) < 10000 && k.metrics?.pnl_usd === d.metrics?.pnl_usd);
+      if (!isDup) closes.push(d);
+    }
     else if (d.type === "deploy") depositsSol += Number(d.metrics?.amount_sol || 0);
   }
 

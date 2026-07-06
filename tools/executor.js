@@ -847,21 +847,7 @@ export async function executeTool(name, args) {
           brand: process.env.CARD_BRAND || "PureXBT",
           url: process.env.CARD_URL || "dlmm.purexbt.dev",
         }).catch(() => {});
-        appendDecision({
-          type: "close",
-          ts: Date.now(),
-          walletAddress: deriveAddress(process.env.WALLET_PRIVATE_KEY || ""),
-          pool_name: result.pool_name || args.position_address?.slice(0, 8),
-          position: result.position || args.position_address,
-          metrics: {
-            pnl_usd: result.pnl_usd ?? 0,
-            pnl_pct: result.pnl_pct ?? 0,
-            fees_usd: result.fees_earned_usd ?? result.total_fees_usd ?? 0,
-            fees_sol: result.fees_earned_sol ?? result.total_fees_sol ?? 0,
-            minutes_held: result.minutes_held ?? null,
-          },
-          reason: args.reason || result.close_reason || "",
-        });
+        /* __CLOSEDEDUP__ entry "close" DIHAPUS dari sini — dlmm.js closePosition sudah menulisnya (semua jalur relay/direct). Dobel penulis = daily PnL 2x (bug daily card, 7 Jul). */
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
           const poolAddr = result.pool || args.pool_address;
