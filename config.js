@@ -151,6 +151,9 @@ export const config = {
     chaseOorUpMinutes:  management.chaseOorUpMinutes  ?? 5,
     maxChasesPerPool:   management.maxChasesPerPool   ?? 2,
     chaseWindowHours:   management.chaseWindowHours   ?? 6,
+    chaseDeterministic: management.chaseDeterministic ?? false, /* __CHASEDET__ */
+    chaseMinVolumeChangePct: management.chaseMinVolumeChangePct ?? -50,
+    chaseMinSwaps5m:    management.chaseMinSwaps5m    ?? 30,
     poolCooldownEnabled: management.poolCooldownEnabled ?? true,  /* __NOCOOLDOWN__ */
     blacklistOnStopLoss: management.blacklistOnStopLoss ?? false,
     oorCooldownTriggerCount: management.oorCooldownTriggerCount ?? 3,
@@ -173,9 +176,6 @@ export const config = {
     trailingTakeProfit:    management.trailingTakeProfit    ?? true,
     trailingTriggerPct:    management.trailingTriggerPct    ?? 3,
     trailingDropPct:       management.trailingDropPct       ?? 1.5,
-    breakevenTriggerPct:  management.breakevenTriggerPct  ?? null,
-    breakevenFloorPct:    management.breakevenFloorPct    ?? 0,
-    ratchetTiers:         management.ratchetTiers         ?? null,
     pnlSanityMaxDiffPct:   management.pnlSanityMaxDiffPct   ?? 5,
     solMode:               management.solMode               ?? false,
     feeSplitUsdcPct:       management.feeSplitUsdcPct       ?? 40,
@@ -268,6 +268,8 @@ export const config = {
 
   indicators: {
     enabled: indicatorUserConfig.enabled ?? false,
+    exitEnabled: indicatorUserConfig.exitEnabled ?? false, /* __INDEXIT__ */
+    exitCheckIntervalSec: indicatorUserConfig.exitCheckIntervalSec ?? 60,
     entryPreset: indicatorUserConfig.entryPreset ?? "supertrend_break",
     exitPreset: indicatorUserConfig.exitPreset ?? "supertrend_break",
     rsiLength: indicatorUserConfig.rsiLength ?? 2,
@@ -279,8 +281,6 @@ export const config = {
     rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
     requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
   },
-
-  momentum: u.momentum ?? { enabled: false },
 };
 
 /**
@@ -355,6 +355,11 @@ export function reloadUserConfigIfChanged() {
       for (const [key, val] of Object.entries(fresh)) {
         if (val !== undefined) target[key] = val;
       }
+    }
+    // __INDEXIT__ hot-reload juga utk section indicators (top-level chartIndicators)
+    const freshInd = freshU.chartIndicators ?? {};
+    for (const [key, val] of Object.entries(freshInd)) {
+      if (val !== undefined) config.indicators[key] = val;
     }
     reloadScreeningThresholds();
     console.log(`[config] Hot-reloaded user-config.json (mtime ${new Date(st.mtimeMs).toISOString()})`);

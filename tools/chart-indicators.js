@@ -227,11 +227,12 @@ async function fetchChartIndicatorsForMint(
 export async function confirmIndicatorPreset({
   mint,
   side,
+  enabledOverride, /* __INDEXIT__ */
   preset = side === "entry" ? config.indicators.entryPreset : config.indicators.exitPreset,
   intervals = config.indicators.intervals,
   refresh = false,
 } = {}) {
-  if (!config.indicators.enabled || !mint || !preset) {
+  if (!(enabledOverride ?? config.indicators.enabled) || !mint || !preset) {
     return { enabled: false, confirmed: true, reason: "Indicators disabled or not configured", intervals: [] };
   }
 

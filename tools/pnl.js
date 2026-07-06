@@ -168,10 +168,20 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   const claimedUsd = safeNum(meteora?.allTimeFees?.total?.usd);
   const claimedSol = safeNum(meteora?.allTimeFees?.total?.sol);
 
-  const pnlUsd = balancesUsd + withdrawUsd + claimableUsd + claimedUsd - depositsUsd;
-  const pnlSol = balancesSol + withdrawSol + claimableSol + claimedSol - depositsSol;
-  const pctUsd = depositsUsd > 0 ? (pnlUsd / depositsUsd) * 100 : 0;
-  const pctSol = depositsSol > 0 ? (pnlSol / depositsSol) * 100 : 0;
+  /* __COSTBASIS__ fallback cost basis dari tracking — deposit Meteora belum keindex/parsial.
+     Utk deploy single-side SOL, amount_sol tracking = cost basis PASTI: PnL & stop-loss
+     tidak perlu menunggu indexer. */
+  const _trkCB = getTrackedPosition(f.position);
+  const _expectSolCB = Number(_trkCB?.amount_sol) || 0;
+  const _apiDepMissing = depositsSol <= 0;
+  const _apiDepIncomplete = _expectSolCB > 0 && depositsSol > 0 && depositsSol < _expectSolCB * 0.9;
+  const _useFallbackBasis = (_apiDepMissing || _apiDepIncomplete) && _expectSolCB > 0;
+  const effDepositsSol = _useFallbackBasis ? _expectSolCB : depositsSol;
+  const effDepositsUsd = _useFallbackBasis ? (solUsd > 0 ? _expectSolCB * solUsd : depositsUsd) : depositsUsd;
+  const pnlUsd = balancesUsd + withdrawUsd + claimableUsd + claimedUsd - effDepositsUsd;
+  const pnlSol = balancesSol + withdrawSol + claimableSol + claimedSol - effDepositsSol;
+  const pctUsd = effDepositsUsd > 0 ? (pnlUsd / effDepositsUsd) * 100 : 0;
+  const pctSol = effDepositsSol > 0 ? (pnlSol / effDepositsSol) * 100 : 0;
   const ourPct = solMode ? pctSol : pctUsd;
 
   // pnl_pct_diff: gap vs Meteora precomputed pct — DIAGNOSTIC ONLY (Sprint A rule).
@@ -181,12 +191,11 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   // Input-validity sanity (Sprint A): suspicious ONLY when it couldn't be priced.
   const holdsTokenX = xHuman > 0 || feeXHuman > 0;
   const priceMissing = !(solUsd > 0) || (holdsTokenX && !!f.baseMint && !(priceX > 0));
-  const depositsMissing = (solMode ? depositsSol : depositsUsd) <= 0;
-  // __PNLRENDER__ deposit parsial: Meteora belum indeks semua add-liquidity tx (deploy = 1 create + 2 addliq)
-  const _trkCost = getTrackedPosition(f.position);
-  const _expectSol = Number(_trkCost?.amount_sol) || 0;
-  const depositsIncomplete = _expectSol > 0 && depositsSol > 0 && depositsSol < _expectSol * 0.9;
-  const pnlPctSuspicious = priceMissing || depositsMissing || depositsIncomplete;
+  /* __COSTBASIS__ basis efektif: fallback tracking menutup kasus missing/parsial —
+     suspicious kini HANYA bila benar-benar tanpa basis atau tanpa harga. */
+  const depositsMissing = (solMode ? effDepositsSol : effDepositsUsd) <= 0;
+  const depositsIncomplete = false; // tertangani fallback cost-basis
+  const pnlPctSuspicious = priceMissing || depositsMissing;
   if (pnlPctSuspicious) {
     log("pnl_warn", `${f.position.slice(0, 8)} suspicious tick — priceMissing=${priceMissing} depositsMissing=${depositsMissing} depositsIncomplete=${depositsIncomplete} (solUsd=${solUsd}, priceX=${priceX})`);
   }

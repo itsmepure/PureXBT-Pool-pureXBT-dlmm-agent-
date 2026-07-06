@@ -8,6 +8,17 @@ Meridian runs continuous screening and management cycles, deploying capital into
 
 ---
 
+## What's New (v3.4)
+
+- **Two-tier chase (reshape)** — chase #1 executes immediately (deterministic close + re-deploy, ~10s end-to-end, no LLM roundtrip; the position is pure SOL so the cost of being wrong is just gas, and live executor safety checks still veto dead pools); chase #2 — when the re-deployed position pumps out *again* — goes through a full LLM momentum judgment. `chaseDeterministic: false` reverts everything to the LLM path
+- **Indicator exit** — an `exitPreset` (default `bb_plus_rsi`: price at upper Bollinger + RSI overbought on 15m candles) is evaluated per open position (~60s throttle) as an overextension detector; a confirmed signal becomes a management alert the LLM can act on. Independent `exitEnabled` switch — entry confirmation stays untouched
+- **Tracked cost basis** — young positions no longer wait for the indexer: PnL (and stop-loss protection) computes from the tracked deploy amount from second zero
+- **Partial-deploy adoption** — wide-range deploys are non-atomic (create + multiple add-liquidity txs); if liquidity adding fails midway, the live on-chain position is now adopted into tracking (named, notified, managed) instead of becoming an orphan
+- **Cleaner reshape notifications** — the chase close no longer sends a close card (the position merely moved); a card is sent only when the position truly ends (re-deploy failed or chase aborted). Outcome notifs (✅/🛑) are evidence-based
+- **Config hot-reload extended** to the `chartIndicators` section; per-wallet dashboard config saves now deep-merge (custom keys survive)
+
+---
+
 ## What's New (v3.3)
 
 - **Hybrid LP strategy** — the LLM picks `spot` or `bid_ask` **per candidate** (hot & extended → bid_ask ladder; stable & mature → spot) and records a one-line `strategy_reason` in the deploy notification and decision log

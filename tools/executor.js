@@ -836,6 +836,7 @@ export async function executeTool(name, args) {
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee, strategy: args.strategy || result.strategy, strategyReason: args.strategy_reason || "" /* __HYBRIDSTRAT__ */ }).catch(() => {});
       } else if (name === "close_position") {
+        if (!args.suppress_close_notif && !String(args.reason || "").toLowerCase().includes("chase_up")) /* __NOTIFSUPPRESS__ card close chase ditunda sampai nasib redeploy jelas */
         notifyClose({ /* __PNLCARD_CALLSITE__ */
           pair: result.pool_name || args.position_address?.slice(0, 8),
           pnlUsd: result.pnl_usd ?? 0,

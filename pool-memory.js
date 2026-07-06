@@ -242,7 +242,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
     entry.base_mint = deployData.base_mint;
   }
 
-  // Auto-blacklist token yang nyeret PnL sampai stop-loss (request user, B pilot)
+  // Auto-blacklist token yang nyeret PnL sampai stop-loss
   if (config.management.blacklistOnStopLoss === true && entry.base_mint) {
     try {
       const _r = String(deploy.close_reason || "").toLowerCase();
@@ -384,7 +384,7 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
 
   if (!db[poolAddress]) {
     db[poolAddress] = {
-      name: snapshot.pair || poolAddress.slice(0, 8),
+      name: (snapshot.pair && !String(snapshot.pair).startsWith("?")) ? snapshot.pair : poolAddress.slice(0, 8), /* __NAMEGUARD__ */
       base_mint: null,
       deploys: [],
       total_deploys: 0,
@@ -505,10 +505,10 @@ export function addPoolNote({ pool_address, note }) {
 /* __POOLNAME_FALLBACK__ — nama pool dari memory utk posisi tanpa tracking (tampilan). */
 export function poolNameFromMemory(poolAddress) {
   if (!poolAddress) return null;
-  try { return load()[poolAddress]?.name || null; } catch { return null; }
+  try { const n = load()[poolAddress]?.name; return (n && !String(n).startsWith("?")) ? n : null; } catch { return null; }
 }
 
-/* __CHASEUP__ chase-up bookkeeping (pilot Agent B) */
+/* __CHASEUP__ chase-up bookkeeping */
 export function recordChase(poolAddress) {
   if (!poolAddress) return;
   const db = load();
@@ -516,7 +516,7 @@ export function recordChase(poolAddress) {
   if (!entry) return;
   entry.chase_history = (entry.chase_history || []).filter((t) => Date.now() - t < 48 * 3600 * 1000);
   entry.chase_history.push(Date.now());
-  entry.chase_pending_until = Date.now() + 10 * 60 * 1000; // 10 menit: markPoolClosed skip cooldown
+  entry.chase_pending_until = Date.now() + 10 * 60 * 1000;
   save(db);
 }
 export function chaseCountInWindow(poolAddress, hours) {

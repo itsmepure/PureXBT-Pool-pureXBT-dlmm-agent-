@@ -813,10 +813,32 @@ export async function deployPosition({
         slippage: 10, // 10%
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
-      for (let i = 0; i < addTxArray.length; i++) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
-        txHashes.push(txHash);
-        log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
+      try { /* __PARTIALDEPLOY__ */
+        for (let i = 0; i < addTxArray.length; i++) {
+          const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
+          txHashes.push(txHash);
+          log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
+        }
+      } catch (addErr) {
+        // Posisi SUDAH live on-chain (create landed) — adopsi ke tracking agar bernama, ternotifikasi & terkelola
+        if (txHashes.length > 0) {
+          try {
+            log("deploy_error", `PARTIAL DEPLOY (${addErr.message}) — posisi ${newPosition.publicKey.toString().slice(0, 8)} live on-chain dgn liquidity parsial; DIADOPSI ke tracking`);
+            trackPosition({
+              position: newPosition.publicKey.toString(),
+              pool: pool_address,
+              pool_name: pool_name || null,
+              strategy: activeStrategy,
+              bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
+              amount_sol: finalAmountY,
+              amount_x: 0,
+              active_bin: activeBin.binId,
+              bin_step: actualBinStep,
+            });
+            markPoolOpened(pool_address, { name: pool_name || undefined, base_mint: baseMint });
+          } catch (adoptErr) { log("deploy_error", `Adopsi partial deploy gagal: ${adoptErr.message}`); }
+        }
+        throw addErr;
       }
     } else {
       // ── Standard Path (≤69 bins) ─────────────────────────────────
