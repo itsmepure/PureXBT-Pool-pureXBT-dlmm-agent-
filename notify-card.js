@@ -11,7 +11,7 @@ import { renderPnlCard } from "./card-renderer.js";
 import { buildCardData } from "./card-data.js";
 import { log } from "./logger.js";
 
-export async function sendPnlCard({ result, tracked, brand, url, walletAddress, solPrice, chatId, token, reason } = {}) { /* __CLOSEREASON__ */
+export async function sendPnlCard({ result, tracked, brand, url, walletAddress, solPrice, chatId, token, reason, reshapeNote } = {}) { /* __CLOSEREASON__ __RESHAPE1MSG__ */
   try {
     if (!token || !chatId) return false;
 
@@ -31,7 +31,9 @@ export async function sendPnlCard({ result, tracked, brand, url, walletAddress, 
         idrLine = `\u2248 ${usdTxt}${idrTxt}\n`;
       }
     } catch { /* IDR best-effort */ }
+    const _reshapeLine = reshapeNote ? `<b>${String(reshapeNote).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 150)}</b>\n` : ""; /* __RESHAPE1MSG__ */
     const caption =
+      _reshapeLine +
       `<b>${pos ? "🟢" : "🔴"} ${data.pair} — POSISI DITUTUP</b>\n` +
       `PnL: <b>${sign}${Number(data.pnlSol).toFixed(4)} SOL</b> (${sign}${Number(data.pnlPct).toFixed(2)}%)\n` +
       idrLine +

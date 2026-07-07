@@ -453,7 +453,7 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct, result, tracked, walletAddress, solPrice, brand, url, reason } = {}) { /* __CLOSEREASON__ */
+export async function notifyClose({ pair, pnlUsd, pnlPct, result, tracked, walletAddress, solPrice, brand, url, reason, reshapeNote } = {}) { /* __CLOSEREASON__ __RESHAPE1MSG__ */
   if (hasActiveLiveMessage()) return;
 
   // Try the rich PnL card first (Metlex-style chart or Fabriq-style fallback).
@@ -463,7 +463,7 @@ export async function notifyClose({ pair, pnlUsd, pnlPct, result, tracked, walle
       const ok = await sendPnlCard({
         result: result || { pool_name: pair, pnl_usd: pnlUsd, pnl_pct: pnlPct },
         tracked: tracked || {},
-        brand, url, walletAddress, solPrice, reason,
+        brand, url, walletAddress, solPrice, reason, reshapeNote, /* __RESHAPE1MSG__ */
         chatId, token: TOKEN,
       });
       if (ok) return;
@@ -516,7 +516,10 @@ export async function notifyChase({ pair, minutes, chaseNum, maxChase }) {
 }
 
 /* __CHASERESULT__ notif hasil reshape */
-export async function notifyChaseResult({ pair, ok, detail }) {
+export async function notifyChaseResult({ pair, ok, detail, closePnl = null }) { /* __CHASEPNL__ */
+  const _pnlLine = closePnl && (closePnl.usd != null || closePnl.pct != null)
+    ? `\u2503 PnL posisi lama: ${Number(closePnl.usd ?? 0) >= 0 ? "+" : ""}${Number(closePnl.usd ?? 0).toFixed(2)} (${Number(closePnl.pct ?? 0) >= 0 ? "+" : ""}${Number(closePnl.pct ?? 0).toFixed(2)}%)\n`
+    : "";
   /* __NOTIFCLEAN__ strip markdown + rapikan jadi satu alur kalimat */
   const escC = (s) => String(s || "").replace(/[*_`#]+/g, "").replace(/\s*\n+\s*/g, " — ").replace(/\s{2,}/g, " ").trim().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   await sendHTML(
@@ -524,6 +527,7 @@ export async function notifyChaseResult({ pair, ok, detail }) {
       ? `┏━━ ✅ <b>RESHAPE BERHASIL, BOS</b> ━━┓\n` +
         `┃ Pool: ${pair}\n` +
         `┃ Posisi lama ditutup (chase_up, tanpa cooldown)\n` +
+        _pnlLine + /* __CHASEPNL__ */
         `┃ Posisi BARU terpasang di bawah harga baru\n` +
         `┗━━ 🐶 Tangga anyar wis siap, Tuanku. ━━┛`
       : `┏━━ 🛑 <b>RESHAPE BATAL, BOS</b> ━━┓\n` +

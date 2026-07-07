@@ -211,6 +211,19 @@ export function resolveHeldCloseCard(position) {
   _heldCloseCards.delete(position);
   return true;
 }
+/* __CHASECARDIMG__ kirim card yang ditahan SEKARANG (dipanggil saat reshape sukses) */
+export async function flushHeldCloseCard(position, reshapeNote = null) { /* __RESHAPE1MSG__ */
+  const h = _heldCloseCards.get(position);
+  if (!h || !h.payload) return false;
+  if (reshapeNote) h.payload.reshapeNote = reshapeNote;
+  clearTimeout(h.timer);
+  _heldCloseCards.delete(position);
+  try {
+    log("executor", `[HELDCARD] card close ${h.payload.pair || String(position).slice(0, 8)} dikirim (reshape sukses)`);
+    await notifyClose(h.payload);
+  } catch { /* best-effort */ }
+  return true;
+}
 function scheduleHeldCloseCard(position, pool, payload) {
   if (!position || _heldCloseCards.has(position)) return;
   const closedAt = Date.now();
@@ -224,7 +237,7 @@ function scheduleHeldCloseCard(position, pool, payload) {
     } catch { /* best-effort */ }
   }, HELD_CARD_DELAY_MIN * 60 * 1000);
   if (typeof timer.unref === "function") timer.unref();
-  _heldCloseCards.set(position, { timer });
+  _heldCloseCards.set(position, { timer, payload }); /* __CHASECARDIMG__ payload disimpan utk flush */
 }
 
 async function validateDeployPoolThresholds(args) {

@@ -12,7 +12,7 @@ import { getTopCandidates } from "./tools/screening.js";
 import { prescreenPools } from "./pool-scorer.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
-import { executeTool, registerCronRestarter, grantChaseDeployBypass , resolveHeldCloseCard , grantUserConfigOverride } from "./tools/executor.js";
+import { executeTool, registerCronRestarter, grantChaseDeployBypass , resolveHeldCloseCard , grantUserConfigOverride , flushHeldCloseCard } from "./tools/executor.js";
 import { setCandidatePools, startMomentumLoop, getExitFlag, getHotList, isOnCooldown, markDeployed, setOnScanComplete, computeDownsidePct, takePrescreenRollup } from "./tools/momentum-scanner.js"; /* __MOMENTUMPORT__ */
 import { trackMomentumExit, startOutcomeSampler, getExitOutcomeStats } from "./tools/momentum-exit-tuner.js"; /* __MOMEXITTUNER__ */
 import {
@@ -162,7 +162,19 @@ async function runMomentumExitTuner() {
   } catch (e) { log("cron_error", `[MOMEXIT-TUNER] ${e.message}`); }
 }
 
-async function sendChaseCloseCard({ position, pair, pool, reason, closeRes = null }) {
+/* __CHASEPNL__ PnL close terakhir utk sebuah posisi dari decision-log (single writer dlmm.js) */
+async function lookupClosePnl(position) {
+  try {
+    const fsm = await import("fs");
+    const dl = JSON.parse(fsm.readFileSync("decision-log.json", "utf8"));
+    const arr = Array.isArray(dl) ? dl : (dl.decisions || []);
+    const e = [...arr].reverse().find((d) => d.type === "close" && d.position === position);
+    if (e?.metrics && (e.metrics.pnl_usd != null || e.metrics.pnl_pct != null)) return { usd: e.metrics.pnl_usd ?? 0, pct: e.metrics.pnl_pct ?? 0 };
+  } catch { /* best-effort */ }
+  return null;
+}
+
+async function sendChaseCloseCard({ position, pair, pool, reason, closeRes = null, reshapeNote = "🛑 RESHAPE TIDAK JADI — posisi ditutup" }) { /* __RESHAPE1MSG__ */
   try { resolveHeldCloseCard(position); } catch { /* __HELDCARD__ cegah card dobel dgn watcher executor */ }
   try {
     const trk = getTrackedPositions(false).find((t) => t.position === position) || {};
@@ -183,6 +195,7 @@ async function sendChaseCloseCard({ position, pair, pool, reason, closeRes = nul
       pnlPct: closeRes?.pnl_pct ?? 0,
       result: closeRes || { pool_name: pair, pool },
       tracked: trk,
+      reshapeNote, /* __RESHAPE1MSG__ */
       solPrice,
       reason,
       walletAddress: (() => { try { return deriveAddress(process.env.WALLET_PRIVATE_KEY || ""); } catch { return null; } })(),
@@ -1075,7 +1088,7 @@ export function startCronJobs() {
                       const depOk = depRes && depRes.success !== false && !depRes.error && !depRes.blocked;
                       if (!depOk) { /* __NOTIFSUPPRESS__ deploy gagal → posisi benar2 berakhir → kirim card close yang tadi ditahan */
                         log("state", `[CHASE-DET] ${_cpair} redeploy GAGAL (${String(depRes?.reason || depRes?.error || "?").slice(0, 80)}) — kirim notif close`);
-                        sendChaseCloseCard({ position: _cpos, pair: _cpair, pool: _cpool, closeRes, reason: `chase_up — redeploy gagal (${String(depRes?.reason || depRes?.error || "safety").slice(0, 100)})` }).catch(() => {}); /* __CHASECARD__ */
+                        sendChaseCloseCard({ position: _cpos, pair: _cpair, pool: _cpool, closeRes, reason: `chase_up — redeploy gagal (${String(depRes?.reason || depRes?.error || "safety").slice(0, 100)})`, reshapeNote: "🛑 RESHAPE GAGAL — redeploy diblok, posisi ditutup" }).catch(() => {}); /* __CHASECARD__ __RESHAPE1MSG__ */
                       }
                     }
                   } catch (e) {
@@ -1083,7 +1096,8 @@ export function startCronJobs() {
                   } finally {
                     try {
                       const redeployed = getTrackedPositions(true).find((t) => t.pool === _cpool && t.deployed_at && Date.parse(t.deployed_at) >= dispatchedAt - 5000);
-                      notifyChaseResult({ pair: _cpair, ok: !!redeployed, detail: outcomeDetail }).catch(() => {});
+                      /* __RESHAPE1MSG__ 1 notif saja: status reshape nempel di caption card; box RESHAPE terpisah dihapus */
+                      if (redeployed) flushHeldCloseCard(_cpos, "✅ RESHAPE BERHASIL — tangga BARU terpasang di bawah harga baru").catch(() => {});
                     } catch { /* best-effort */ }
                     _chaseDispatched.delete(_cpos);
                   }
@@ -1096,7 +1110,8 @@ export function startCronJobs() {
                   log("state", `[CHASE] selesai: ${String(r?.content || "").slice(0, 160)}`);
                   try { /* __CHASERESULT__ */
                     const redeployed = getTrackedPositions(true).find((t) => t.pool === p.pool && t.deployed_at && Date.parse(t.deployed_at) >= dispatchedAt - 5000);
-                    notifyChaseResult({ pair: p.pair, ok: !!redeployed, detail: String(r?.content || "") }).catch(() => {});
+                    /* __RESHAPE1MSG__ 1 notif saja — box RESHAPE terpisah dihapus */
+                    if (redeployed) flushHeldCloseCard(p.position, "✅ RESHAPE BERHASIL — tangga BARU terpasang di bawah harga baru").catch(() => {});
                     /* __NOTIFSUPPRESS__ close chase_up cardnya ditahan executor; kalau TIDAK berujung redeploy → posisi benar2 berakhir → kirim card sekarang */
                     if (!redeployed) {
                       const trkAll = getTrackedPositions(false).find((t) => t.position === p.position);
