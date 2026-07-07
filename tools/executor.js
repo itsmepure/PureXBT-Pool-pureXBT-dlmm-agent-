@@ -1,4 +1,5 @@
 import { discoverPools, getPoolDetail, getTopCandidates, meteoraFetchWithCache } from "./screening.js";
+import { getTokenAgeHours } from "./dexscreener.js"; /* __TOKENAGE__ */
 import {
   getActiveBin,
   deployPosition,
@@ -12,7 +13,7 @@ import {
 import { getWalletBalances, swapToken, deriveAddress } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, deleteLesson, manageLesson, getAuthorStats } from "../lessons.js";
-import { setPositionInstruction } from "../state.js";
+import { setPositionInstruction, getTrackedPositions } from "../state.js"; /* __HELDCARD__ */
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -198,6 +199,34 @@ async function fetchFreshPoolDetail(poolAddress, timeframe = config.screening.ti
   return (data?.data || [])[0] ?? null;
 }
 
+/* __HELDCARD__ watcher fallback: card close yang ditahan (reason chase_up / suppress flag) dikirim setelah
+   HELD_CARD_DELAY_MIN bila pool TIDAK punya posisi baru (redeploy tak terjadi). Menutup celah close LLM
+   yang menulis kata chase_up di reason (kasus BULLTARDIO 7 Jul: notif hilang total). */
+const HELD_CARD_DELAY_MIN = 6;
+const _heldCloseCards = new Map(); // position -> { timer }
+export function resolveHeldCloseCard(position) {
+  const h = _heldCloseCards.get(position);
+  if (!h) return false;
+  clearTimeout(h.timer);
+  _heldCloseCards.delete(position);
+  return true;
+}
+function scheduleHeldCloseCard(position, pool, payload) {
+  if (!position || _heldCloseCards.has(position)) return;
+  const closedAt = Date.now();
+  const timer = setTimeout(() => {
+    _heldCloseCards.delete(position);
+    try {
+      const redeployed = pool && getTrackedPositions(true).some((t) => t.pool === pool && t.deployed_at && Date.parse(t.deployed_at) >= closedAt - 10000);
+      if (redeployed) return; // chase/redeploy sukses — notif RESHAPE/deploy sudah mewakili
+      log("executor", `[HELDCARD] card close ${payload.pair || String(position).slice(0, 8)} dikirim via watcher (tak ada redeploy dalam ${HELD_CARD_DELAY_MIN}m)`);
+      notifyClose(payload).catch(() => {});
+    } catch { /* best-effort */ }
+  }, HELD_CARD_DELAY_MIN * 60 * 1000);
+  if (typeof timer.unref === "function") timer.unref();
+  _heldCloseCards.set(position, { timer });
+}
+
 async function validateDeployPoolThresholds(args) {
   let detail;
   try {
@@ -282,6 +311,19 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
+  /* __TOKENAGE__ gate umur token minimal (jam) — fail-closed; sumber DexScreener pairCreatedAt tertua */
+  const minAgeH = numberOrNull(config.screening.minTokenAgeHours);
+  if (minAgeH != null && minAgeH > 0) {
+    const baseMint = detail?.token_x?.address || detail?.base_token_address || detail?.base_mint || null;
+    const ageH = baseMint ? await getTokenAgeHours(baseMint).catch(() => null) : null;
+    if (ageH == null) {
+      return { pass: false, reason: `Could not verify token age (minTokenAgeHours ${minAgeH}h) before deploy.` };
+    }
+    if (ageH < minAgeH) {
+      return { pass: false, reason: `Token age ${ageH.toFixed(1)}h is below configured minTokenAgeHours ${minAgeH}h.` };
+    }
+  }
+
   return { pass: true };
 }
 
@@ -315,7 +357,24 @@ function coerceStringArray(value, key) {
   return value.map((entry) => coerceString(entry, key)).filter(Boolean);
 }
 
+/* __USERONLY__ kunci keputusan user (sizing modal + SL/TP/trailing/fee-split) — LLM DILARANG mengubah via update_config.
+   Jalur user (dashboard/TG settings//setcfg) memanggil grantUserConfigOverride() sesaat sebelum executeTool (pola §180).
+   hardStopLossPct belum ada di CONFIG_MAP — masuk daftar utk jaga-jaga bila kelak ditambah. */
+const USER_ONLY_CONFIG_KEYS = new Set(["deployAmountSol", "maxDeployAmount", "positionSizePct", "gasReserve", "maxPositions", "takeProfitPct", "takeProfitFeePct", "stopLossPct", "hardStopLossPct", "trailingDropPct", "trailingTriggerPct", "feeSplitUsdcPct"]);
+let _userCfgOverrideUntil = 0;
+export function grantUserConfigOverride() { _userCfgOverrideUntil = Date.now() + 5000; }
+function _consumeUserConfigOverride() { const ok = Date.now() < _userCfgOverrideUntil; _userCfgOverrideUntil = 0; return ok; }
+
 function normalizeConfigValue(key, value) {
+  /* __MOMEXITTUNER__ clamp kunci momentum-exit — LLM tak bisa set nilai ekstrem */
+  const MOMEXIT_CLAMPS = { momentumExitBuysVsSellsBelow: [0.5, 1.2], momentumExitPriceChangeBelow: [-5, 0], momentumExitConfirmTicks: [1, 10] };
+  if (key in MOMEXIT_CLAMPS) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) throw new Error(`${key} must be a finite number`);
+    const [lo, hi] = MOMEXIT_CLAMPS[key];
+    const clamped = Math.min(hi, Math.max(lo, n));
+    return key === "momentumExitConfirmTicks" ? Math.round(clamped) : clamped;
+  }
   const booleanKeys = new Set([
     "excludeHighSupplyConcentration",
     "useDiscordSignals",
@@ -653,10 +712,16 @@ const toolMap = {
       rsiOversold: ["indicators", "rsiOversold", ["chartIndicators", "rsiOversold"]],
       rsiOverbought: ["indicators", "rsiOverbought", ["chartIndicators", "rsiOverbought"]],
       requireAllIntervals: ["indicators", "requireAllIntervals", ["chartIndicators", "requireAllIntervals"]],
+      /* __MOMEXITTUNER__ momentum-exit self-tuning — nested explicitPath, hot-reload __MOMGATES__ menangkap <=15s */
+      momentumExitBuysVsSellsBelow: ["momentum", "exit.buysVsSellsBelow", ["momentum", "exit", "buysVsSellsBelow"]],
+      momentumExitPriceChangeBelow: ["momentum", "exit.priceChangeBelow", ["momentum", "exit", "priceChangeBelow"]],
+      momentumExitConfirmTicks: ["momentum", "exit.confirmTicks", ["momentum", "exit", "confirmTicks"]],
     };
 
     const applied = {};
     const unknown = [];
+    const blockedUserOnly = []; /* __USERONLY__ */
+    const _userGrant = _consumeUserConfigOverride();
 
     // Build case-insensitive lookup
     const CONFIG_MAP_LOWER = Object.fromEntries(
@@ -671,6 +736,7 @@ const toolMap = {
     for (const [key, val] of Object.entries(changes)) {
       const match = CONFIG_MAP[key] ? [key, CONFIG_MAP[key]] : CONFIG_MAP_LOWER[key.toLowerCase()];
       if (!match) { unknown.push(key); continue; }
+      if (USER_ONLY_CONFIG_KEYS.has(match[0]) && !_userGrant) { blockedUserOnly.push(match[0]); continue; } /* __USERONLY__ */
       try {
         let normalizedVal = val;
         if (STRATEGY_BIN_KEYS.has(match[0])) {
@@ -689,6 +755,10 @@ const toolMap = {
     }
 
     if (Object.keys(applied).length === 0) {
+      if (blockedUserOnly.length) { /* __USERONLY__ pesan jelas ke LLM */
+        log("config", `update_config DITOLAK — kunci user-only: ${blockedUserOnly.join(", ")} (${reason})`);
+        return { success: false, blocked_user_only: blockedUserOnly, error: `Keys [${blockedUserOnly.join(", ")}] are USER-ONLY (locked from the agent). Only the boss can change them via dashboard or Telegram. Do not retry.`, unknown, reason };
+      }
       log("config", `update_config failed — unknown keys: ${JSON.stringify(unknown)}, raw changes: ${JSON.stringify(changes)}`);
       return { success: false, unknown, reason };
     }
@@ -705,6 +775,16 @@ const toolMap = {
     // Apply to live config immediately after the persisted config is known-good.
     for (const [key, val] of Object.entries(applied)) {
       const [section, field] = CONFIG_MAP[key];
+      if (field.includes(".")) { /* __MOMEXITTUNER__ nested field (momentum exit.*) — update in-place, referensi objek scanner tetap */
+        const parts = field.split(".");
+        let t = config[section] || (config[section] = {});
+        for (const part of parts.slice(0, -1)) { if (!t[part] || typeof t[part] !== "object") t[part] = {}; t = t[part]; }
+        const leaf = parts[parts.length - 1];
+        const beforeN = t[leaf];
+        t[leaf] = val;
+        log("config", `update_config: config.${section}.${field} ${beforeN} → ${val}`);
+        continue;
+      }
       const before = config[section][field];
       config[section][field] = val;
       log("config", `update_config: config.${section}.${field} ${before} → ${val} (verify: ${config[section][field]})`);
@@ -771,7 +851,7 @@ const toolMap = {
     }
 
     log("config", `Agent self-tuned: ${JSON.stringify(applied)} — ${reason}`);
-    return { success: true, applied, unknown, reason };
+    return { success: true, applied, unknown, ...(blockedUserOnly.length ? { blocked_user_only: blockedUserOnly, note: `Keys [${blockedUserOnly.join(", ")}] are USER-ONLY and were NOT changed.` } : {}), reason }; /* __USERONLY__ */
   },
 };
 
@@ -836,8 +916,7 @@ export async function executeTool(name, args) {
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee, strategy: args.strategy || result.strategy, strategyReason: args.strategy_reason || "" /* __HYBRIDSTRAT__ */ }).catch(() => {});
       } else if (name === "close_position") {
-        if (!args.suppress_close_notif && !String(args.reason || "").toLowerCase().includes("chase_up")) /* __NOTIFSUPPRESS__ card close chase ditunda sampai nasib redeploy jelas */
-        notifyClose({ /* __PNLCARD_CALLSITE__ */
+        const _closeCardPayload = { /* __PNLCARD_CALLSITE__ */
           pair: result.pool_name || args.position_address?.slice(0, 8),
           pnlUsd: result.pnl_usd ?? 0,
           pnlPct: result.pnl_pct ?? 0,
@@ -846,7 +925,10 @@ export async function executeTool(name, args) {
           walletAddress: (() => { try { return deriveAddress(process.env.WALLET_PRIVATE_KEY || ""); } catch { return null; } })(),
           brand: process.env.CARD_BRAND || "PureXBT",
           url: process.env.CARD_URL || "dlmm.purexbt.dev",
-        }).catch(() => {});
+        };
+        if (!args.suppress_close_notif && !String(args.reason || "").toLowerCase().includes("chase_up")) /* __NOTIFSUPPRESS__ card close chase ditunda sampai nasib redeploy jelas */
+          notifyClose(_closeCardPayload).catch(() => {});
+        else scheduleHeldCloseCard(result.position || args.position_address, result.pool || args.pool_address, _closeCardPayload); /* __HELDCARD__ */
         /* __CLOSEDEDUP__ entry "close" DIHAPUS dari sini — dlmm.js closePosition sudah menulisnya (semua jalur relay/direct). Dobel penulis = daily PnL 2x (bug daily card, 7 Jul). */
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {

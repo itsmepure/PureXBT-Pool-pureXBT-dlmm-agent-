@@ -38,7 +38,8 @@ export function momentumExitFlag(metrics, cfg) {
   const exit = cfg.exit || {};
   const bvsFloor = exit.buysVsSellsBelow ?? 1.0;
   const pcFloor = exit.priceChangeBelow ?? 0;
-  return metrics.buys_vs_sells_5m < bvsFloor || metrics.price_change_5m < pcFloor;
+  /* __MOMEXITGATE__ #4: OR -> AND — butuh konfirmasi dua sisi (seller dominan DAN harga merah) */
+  return metrics.buys_vs_sells_5m < bvsFloor && metrics.price_change_5m < pcFloor;
 }
 
 // ---- injectable fetcher (for offline tests) --------------------------------
@@ -123,8 +124,10 @@ export function getHotList(cfg) {
 // ---- exit flags ------------------------------------------------------------
 
 const _exit = new Map(); // mint -> boolean
+const _exitStreak = new Map(); /* __MOMEXITGATE__ #2: mint -> jumlah scan beruntun kondisi exit mentah nyala */
 export function _resetExit() {
   _exit.clear();
+  _exitStreak.clear(); /* __MOMEXITGATE__ */
 }
 export function getExitFlag(mint) {
   return _exit.get(mint) === true;
@@ -201,7 +204,11 @@ export async function scanMomentum(candidateMints, cfg) {
     } else {
       _hot.delete(mint);
     }
-    _exit.set(mint, momentumExitFlag(metrics, cfg));
+    /* __MOMEXITGATE__ #2: persistence — flag valid setelah >= confirmTicks scan beruntun (default 3 ~ 1 menit @20s) */
+    const _rawExit = momentumExitFlag(metrics, cfg);
+    const _streak = _rawExit ? (_exitStreak.get(mint) || 0) + 1 : 0;
+    _exitStreak.set(mint, _streak);
+    _exit.set(mint, _streak >= ((cfg.exit || {}).confirmTicks ?? 3));
   }
   return { scanned, hot: _hot.size };
 }
@@ -263,6 +270,12 @@ export function prescreenReason(metrics, cfg) {
   if (vol < p.volumeUsd) return "vol";
   if (tx < p.txCount) return "tx";
   if (lp < p.lpUsd) return "lp";
+  /* __TOKENAGE__ umur token minimal (jam) — fail-closed bila umur tak diketahui */
+  if (p.minAgeHours != null && p.minAgeHours > 0) {
+    const ageH = metrics.pair_age_h == null ? NaN : Number(metrics.pair_age_h);
+    if (!Number.isFinite(ageH)) return "ageMissing";
+    if (ageH < p.minAgeHours) return "age";
+  }
   return "pass";
 }
 

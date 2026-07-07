@@ -21,7 +21,7 @@ export function mapMetrics5m(pair) {
   const tx_count_5m = buys + sells;
   const buys_vs_sells_5m = buys === 0 && sells === 0 ? 0 : buys / Math.max(1, sells);
   const price_change_5m = Number(pair?.priceChange?.m5) || 0;
-  return { volume_5m, tx_count_5m, buys_vs_sells_5m, price_change_5m, lp_usd: Number(pair?.liquidity?.usd) || 0, market_cap: Number(pair?.marketCap ?? pair?.fdv) || 0 };
+  return { volume_5m, tx_count_5m, buys_vs_sells_5m, price_change_5m, lp_usd: Number(pair?.liquidity?.usd) || 0, market_cap: Number(pair?.marketCap ?? pair?.fdv) || 0, price_usd: Number(pair?.priceUsd) || null /* __MOMEXITTUNER__ */ };
 }
 
 async function _fetchJson(url) {
@@ -56,10 +56,35 @@ export async function getMetrics5m(mint) {
     return null;
   }
   const metrics = mapMetrics5m(pair);
+  /* __TOKENAGE__ umur pair TERTUA di response (proxy umur token), jam; null bila tak diketahui */
+  let _oldestCreated = null;
+  for (const pr of json?.pairs || []) {
+    const c = Number(pr?.pairCreatedAt);
+    if (Number.isFinite(c) && c > 0 && (_oldestCreated == null || c < _oldestCreated)) _oldestCreated = c;
+  }
+  metrics.pair_age_h = _oldestCreated != null ? (Date.now() - _oldestCreated) / 3600000 : null;
   _cache.set(mint, { at: now, metrics });
   return metrics;
 }
 
 export function _clearCache() {
   _cache.clear();
+}
+
+/* __TOKENAGE__ umur token (jam) dari pairCreatedAt tertua; cache 10m; null = tak diketahui */
+const _ageCache = new Map(); // mint -> { at, oldest }
+export async function getTokenAgeHours(mint) {
+  const now = Date.now();
+  const hit = _ageCache.get(mint);
+  const fromHit = (h) => (h && h.oldest != null ? (Date.now() - h.oldest) / 3600000 : null);
+  if (hit && now - hit.at < 600000) return fromHit(hit);
+  let json = null;
+  try { json = await _fetchJson(`${BASE}/${mint}`); } catch { return fromHit(hit); }
+  let oldest = null;
+  for (const pr of json?.pairs || []) {
+    const c = Number(pr?.pairCreatedAt);
+    if (Number.isFinite(c) && c > 0 && (oldest == null || c < oldest)) oldest = c;
+  }
+  if (json?.pairs?.length || !hit) _ageCache.set(mint, { at: now, oldest: oldest ?? hit?.oldest ?? null });
+  return oldest != null ? (now - oldest) / 3600000 : fromHit(hit);
 }

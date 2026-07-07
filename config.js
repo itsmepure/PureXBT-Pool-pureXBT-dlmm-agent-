@@ -272,6 +272,8 @@ export const config = {
     enabled: indicatorUserConfig.enabled ?? false,
     exitEnabled: indicatorUserConfig.exitEnabled ?? false, /* __INDEXIT__ */
     exitCheckIntervalSec: indicatorUserConfig.exitCheckIntervalSec ?? 60,
+    exitMinAgeMin: indicatorUserConfig.exitMinAgeMin ?? 30, /* __INDEXITGATE__ */
+    exitMinPnlPct: indicatorUserConfig.exitMinPnlPct ?? 2, /* __INDEXITGATE__ */
     entryPreset: indicatorUserConfig.entryPreset ?? "supertrend_break",
     exitPreset: indicatorUserConfig.exitPreset ?? "supertrend_break",
     rsiLength: indicatorUserConfig.rsiLength ?? 2,

@@ -12,8 +12,9 @@ import { getTopCandidates } from "./tools/screening.js";
 import { prescreenPools } from "./pool-scorer.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
-import { executeTool, registerCronRestarter, grantChaseDeployBypass } from "./tools/executor.js";
+import { executeTool, registerCronRestarter, grantChaseDeployBypass , resolveHeldCloseCard , grantUserConfigOverride } from "./tools/executor.js";
 import { setCandidatePools, startMomentumLoop, getExitFlag, getHotList, isOnCooldown, markDeployed, setOnScanComplete, computeDownsidePct, takePrescreenRollup } from "./tools/momentum-scanner.js"; /* __MOMENTUMPORT__ */
+import { trackMomentumExit, startOutcomeSampler, getExitOutcomeStats } from "./tools/momentum-exit-tuner.js"; /* __MOMEXITTUNER__ */
 import {
   startPolling,
   stopPolling,
@@ -139,7 +140,30 @@ import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 const _indExitLastCheck = new Map();
 const _indExitAlerts = new Map();
 /* __CHASECARD__ card close chase dgn argumen selengkap jalur executor */
+/* __MOMEXITTUNER__ tuner 12 jam: LLM menilai outcome nyata momentum-exit lalu boleh menyetel
+   momentum.exit via update_config (kunci momentumExit*, ter-clamp executor). Marker file anti-dobel restart. */
+const TUNER_MARKER = "./logs/momentum-tuner-last.txt";
+const TUNER_INTERVAL_MS = 12 * 60 * 60 * 1000;
+async function runMomentumExitTuner() {
+  try {
+    const fsm = await import("fs");
+    let last = 0;
+    try { last = Number(fsm.readFileSync(TUNER_MARKER, "utf8")) || 0; } catch { /* run pertama */ }
+    if (Date.now() - last < TUNER_INTERVAL_MS) return;
+    fsm.writeFileSync(TUNER_MARKER, String(Date.now()));
+    const stats = getExitOutcomeStats(7);
+    if ((stats.total || 0) < 5) { log("cron", `[MOMEXIT-TUNER] skip — baru ${stats.total} outcome (<5, butuh bukti lebih)`); return; }
+    const cur = config.momentum?.exit || {};
+    const prompt = `MOMENTUM-EXIT TUNER (self-improvement): Review REAL outcomes of the momentum-exit rule and decide whether to adjust its parameters. EVIDENCE (price move ~30m AFTER each momentum-exit close; good_exit = price dumped >=3% after we left, the exit saved us; premature = price pumped >=3% after we left, we exited a healthy runner; neutral = flat): ${JSON.stringify(stats)}. CURRENT PARAMS: ${JSON.stringify(cur)}. You may change them via update_config with keys: momentumExitBuysVsSellsBelow (clamp 0.5-1.2; exit requires buys/sells BELOW this), momentumExitPriceChangeBelow (clamp -5..0; exit requires 5m price change BELOW this), momentumExitConfirmTicks (clamp 1-10; consecutive 20s scans required). RULES: make AT MOST ONE small adjustment per run (ticks +/-1, bvs +/-0.05, priceChange +/-0.5) and ONLY when evidence clearly leans one way (>=60% of non-neutral outcomes and >=5 samples). premature-dominant -> make exit STRICTER (raise confirmTicks, lower buysVsSellsBelow, or more negative priceChangeBelow). good_exit-dominant with large average dumps -> make exit slightly FASTER (opposite, one step). Mixed or thin evidence -> reply NO-CHANGE and why. Always pass a clear reason to update_config. Do NOT touch any other config keys. Finish with a 2-3 sentence summary in Bahasa Indonesia.`;
+    const r = await agentLoop(prompt, 8, [], "GENERAL");
+    const summary = String(r?.content || "").slice(0, 900);
+    log("cron", `[MOMEXIT-TUNER] selesai: ${summary.slice(0, 180)}`);
+    sendMessage(`🧪 <b>Momentum-exit tuner (12h)</b>:\n${summary}`).catch(() => {});
+  } catch (e) { log("cron_error", `[MOMEXIT-TUNER] ${e.message}`); }
+}
+
 async function sendChaseCloseCard({ position, pair, pool, reason, closeRes = null }) {
+  try { resolveHeldCloseCard(position); } catch { /* __HELDCARD__ cegah card dobel dgn watcher executor */ }
   try {
     const trk = getTrackedPositions(false).find((t) => t.position === position) || {};
     if (!closeRes) {
@@ -357,9 +381,12 @@ export async function runManagementCycle({ silent = false } = {}) {
       /* __MOMENTUMPORT__ momentum death exit — trigger tambahan, tak menekan SL/TP/trailing */
       if (config.momentum?.enabled && !exitMap.has(p.position)) {
         const mmMint = p.base_mint || p.token_x?.mint || null;
-        if (mmMint && getExitFlag(mmMint)) {
+        /* __MOMEXITGATE__ #1: OOR-atas = posisi ~100% SOL (nol risiko IL) — jangan close, biarkan chase-up yang urus */
+        const mmOorUp = p.active_bin != null && p.upper_bin != null && p.active_bin > p.upper_bin;
+        if (mmMint && !mmOorUp && getExitFlag(mmMint)) {
           exitMap.set(p.position, "momentum-exit (buys<sells or price<0)");
           log("state", `Momentum exit for ${p.pair}: momentum died`);
+          trackMomentumExit({ position: p.position, mint: mmMint, pair: p.pair, cfg: config.momentum }); /* __MOMEXITTUNER__ */
         }
       }
       if (exitMap.has(p.position)) {
@@ -1089,7 +1116,11 @@ export function startCronJobs() {
         /* __INDEXIT__ cek indicator exit (throttled, async, fail-open ke arah tanpa-alert) */
         try {
           const ind = config.indicators;
-          if (ind.exitEnabled === true && p.in_range && !p.pnl_pct_suspicious && p.base_mint) {
+          /* __INDEXITGATE__ gate: umur posisi >= exitMinAgeMin (default 30m) & PnL >= exitMinPnlPct (default +2%) — cegah indicator exit menutup posisi baru/PnL tipis (kondisi bb_plus_rsi ~= kondisi entry momentum) */
+          const _indTrkG = getTrackedPosition(p.position);
+          const _indAgeMinG = _indTrkG?.deployed_at ? (Date.now() - Date.parse(_indTrkG.deployed_at)) / 60000 : null;
+          const _indGateOkG = _indAgeMinG != null && _indAgeMinG >= (ind.exitMinAgeMin ?? 30) && typeof p.pnl_pct === "number" && p.pnl_pct >= (ind.exitMinPnlPct ?? 2);
+          if (ind.exitEnabled === true && p.in_range && !p.pnl_pct_suspicious && p.base_mint && _indGateOkG) {
             const lastC = _indExitLastCheck.get(p.position) || 0;
             if (Date.now() - lastC >= (ind.exitCheckIntervalSec ?? 60) * 1000 && !_indExitAlerts.has(p.position)) {
               _indExitLastCheck.set(p.position, Date.now());
@@ -1187,6 +1218,8 @@ export function startCronJobs() {
     });
     startMomentumLoop(config.momentum);
     log("cron", `Momentum scan loop started — every ${config.momentum.scanIntervalSec || 20}s`);
+    startOutcomeSampler(); /* __MOMEXITTUNER__ */
+    setInterval(() => { runMomentumExitTuner().catch((e) => log("cron_error", `[MOMEXIT-TUNER] tick: ${e.message}`)); }, 30 * 60 * 1000);
   }
 }
 
@@ -1662,7 +1695,7 @@ async function applySettingsMenuCallback(msg) {
     return;
   }
 
-  const result = await executeTool("update_config", {
+  const result = await (grantUserConfigOverride(), executeTool)("update_config", { /* __USERONLY__ jalur user (TG) */
     changes: { [key]: value },
     reason: "Telegram settings menu",
   });
@@ -1790,7 +1823,8 @@ async function deployLatestCandidate(index) {
   return { result, candidate, deployAmount, binsBelow };
 }
 
-/* __MOMENTUMPORT__ deploy driver hot-list — strategy mengikuti config.strategy.strategy (hybrid); depth dari volatility di-clamp executor per band strategi. */
+/* __MOMENTUMPORT__ deploy driver hot-list — strategy mengikuti strategi aktif (hybrid):
+   strategy dipaksa "spot"; downside dari volatility di-clamp executor ke band spot [30,40]. */
 async function deployHotCandidate(candidate) {
   const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
   const downsidePct = computeDownsidePct(candidate.volatility);
@@ -2053,7 +2087,7 @@ async function telegramHandler(msg) {
     try {
       const key = setCfgMatch[1];
       const value = parseConfigValue(setCfgMatch[2]);
-      const result = await executeTool("update_config", {
+      const result = await (grantUserConfigOverride(), executeTool)("update_config", { /* __USERONLY__ jalur user (TG) */
         changes: { [key]: value },
         reason: "Telegram slash command /setcfg",
       });

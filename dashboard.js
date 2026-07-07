@@ -23,7 +23,7 @@ import { getPerformanceHistory, reconcileClosedPnl } from "./lessons.js";
 import { getMyPositions } from "./tools/dlmm.js";
 import { getWalletBalances, deriveAddress, resetWallet } from "./tools/wallet.js";
 import { resetDlmmWallet } from "./tools/dlmm.js";
-import { executeTool } from "./tools/executor.js";
+import { executeTool , grantUserConfigOverride } from "./tools/executor.js";
 import { agentLoop } from "./agent.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -562,7 +562,7 @@ async function handlePostConfig(req, res) {
     return jsonReply(res, 400, { ok: false, error: "Missing config changes in body" });
   }
   try {
-    const result = await executeTool("update_config", {
+    const result = await (grantUserConfigOverride(), executeTool)("update_config", { /* __USERONLY__ jalur user */
       changes,
       reason: body?.reason || "dashboard_config",
     });
@@ -1892,7 +1892,7 @@ async function handlePostWalletConfig(req, res) {
         if (body.config[section]) Object.assign(changes, body.config[section]);
       }
       if (Object.keys(changes).length) {
-        await executeTool("update_config", { changes, reason: `dashboard wallet ${wallet.name}` });
+        await (grantUserConfigOverride(), executeTool)("update_config", { /* __USERONLY__ jalur user */ changes, reason: `dashboard wallet ${wallet.name}` });
       }
     } catch (err) {
       log("dashboard_warn", `Failed to apply wallet config: ${err.message}`);

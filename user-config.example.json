@@ -94,7 +94,11 @@
     "candles": 298,
     "rsiOversold": 30,
     "rsiOverbought": 80,
-    "requireAllIntervals": false
+    "requireAllIntervals": false,
+    "exitEnabled": false,
+    "exitCheckIntervalSec": 60,
+    "exitMinAgeMin": 30,
+    "exitMinPnlPct": 0.5
   },
   "telegramChatId": "",
   "hiveMindUrl": "",
@@ -121,7 +125,8 @@
     },
     "exit": {
       "buysVsSellsBelow": 1,
-      "priceChangeBelow": 0
+      "priceChangeBelow": 0,
+      "confirmTicks": 3
     },
     "source": "dexscreener",
     "hotTtlSec": 90,
@@ -133,7 +138,13 @@
       "mcapMax": 10000000,
       "volumeUsd": 500,
       "txCount": 5,
-      "lpUsd": 10000
+      "lpUsd": 10000,
+      "minAgeHours": 3
+    }
+  },
+  "global": {
+    "screening": {
+      "minTokenAgeHours": 3
     }
   }
 }
